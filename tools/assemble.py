@@ -26,6 +26,7 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _blender as B  # noqa: E402
 import kit  # noqa: E402
+import _formats as F  # noqa: E402
 from _common import ArgParser, BadInput, EXIT_GATE, EXIT_OK, load_json, save_json  # noqa: E402
 
 USAGE = ('blender -b --python tools/assemble.py -- [--project DIR] [--build data/build.json] '
@@ -65,15 +66,13 @@ def plan(project, build, working):
         mod = os.path.join(d, a + '.py')
         if not os.path.isfile(mod):
             raise BadInput('accepted module not found: %s' % mod)
-        man = load_json(os.path.join(d, 'manifest.json'), 'manifest of %s %s' % (a, version_dir(e['version'])))
-        if not isinstance(man, dict) or not man.get('sha256'):
-            raise BadInput('manifest of %s %s has no sha256' % (a, version_dir(e['version'])))
+        mp = os.path.join(d, 'manifest.json')
+        man = F.manifest(load_json(mp, 'manifest'), a, e['version'], 'accepted/%s/%s/manifest.json'
+                         % (a, version_dir(e['version'])))
         got = sha256(mod)
         if str(man['sha256']).lower() != got:
             problems.append('%s %s: the module does not match its manifest hash' % (a, version_dir(e['version'])))
-        dep = man.get('depends_on', [])
-        if not isinstance(dep, list):
-            raise BadInput('manifest of %s: depends_on must be a list' % a)
+        dep = man['depends_on']
         steps.append(dict(assembly=a, version=version_dir(e['version']), module=mod, sha256=got,
                           depends_on=[str(x) for x in dep]))
     if working and working not in names:
@@ -109,14 +108,16 @@ def main(argv):
     project = os.path.abspath(a.project)
     if not os.path.isdir(project):
         raise BadInput('project folder not found: %s' % project)
-    build = load_json(a.build or os.path.join(project, 'data', 'build.json'), 'build list')
-    if not isinstance(build, list):
-        raise BadInput('the build list must be a JSON list')
+    build = F.build(load_json(a.build or os.path.join(project, 'data', 'build.json'), 'build list'),
+                    os.path.basename(a.build or 'build.json'))
     if not build and not a.working:
         raise BadInput('the build list is empty')
-    vehicle = load_json(os.path.join(project, 'data', 'vehicle.json'), 'vehicle.json')
+    vehicle = F.vehicle(load_json(os.path.join(project, 'data', 'vehicle.json'), 'vehicle.json'))
     finishes = kit.read_json(os.path.join(project, 'data', 'finishes.json'))
+    if finishes is not None:
+        F.finishes(finishes)
     parts = kit.read_json(os.path.join(project, 'data', 'parts.json'), [])
+    F.parts(parts)
     out = os.path.abspath(a.out or os.path.join(project, 'out', ('work-%s.blend' % a.working) if a.working
                                                 else 'vehicle.blend'))
     steps, problems = plan(project, build, a.working)

@@ -4,14 +4,15 @@ import subprocess
 import sys
 import time
 
-from conftest import ENV, TOOLS, read_json, run_tool, write_json
+from conftest import ENV, TOOLS, camera_at, camera_entry, read_json, run_tool, write_json
 
 
 def fill_round(rnd, worse=False):
+    cam = camera_at((-5000.0, -4000.0, 1500.0))
     write_json(rnd / 'cameras.json', {'cameras': {
-        'front-34': {'rms_mm': 4.0, 'grade': 'precise'}, 'rear-34': {'rms_mm': 6.0, 'grade': 'precise'},
-        'side': {'rms_mm': 2.0, 'planar': True, 'grade': 'visual'},
-        'drawing': {'rms_mm': 15.0 if worse else 5.0, 'grade': 'visual' if worse else 'precise'}}})
+        'front-34': camera_entry(cam, rms_mm=4.0), 'rear-34': camera_entry(cam, rms_mm=6.0),
+        'side': camera_entry(cam, rms_mm=2.0, planar=True, grade='visual'),
+        'drawing': camera_entry(cam, rms_mm=15.0 if worse else 5.0, grade='visual' if worse else 'precise')}})
     write_json(rnd / 'dimensions.json', {'dimensions': {
         'length': {'measured_mm': 4203.0, 'maker_mm': 4200.0, 'error_mm': 3.0, 'judged': True},
         'width': {'measured_mm': 1800.0, 'maker_mm': 1800.0, 'error_mm': 0.0, 'judged': True},
@@ -51,11 +52,11 @@ def test_gates_fail_and_changed_limits(project):
     g = read_json(rnd / 'gates.json')
     assert g['summary']['cameras'] == 'fail' and g['passed'] is False
     # a project can loosen a limit; the change is printed and recorded
-    write_json(project / 'data' / 'limits.json', {'min_precise_views': 2})
+    write_json(project / 'data' / 'limits.json', {'camera_rms_mm': 20})
     r = run_tool('gates.py', rnd)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert 'min_precise_views 3 -> 2' in r.stdout
-    assert read_json(rnd / 'gates.json')['changed_limits']['min_precise_views']['used'] == 2
+    assert 'camera_rms_mm 12 -> 20' in r.stdout
+    assert read_json(rnd / 'gates.json')['changed_limits']['camera_rms_mm']['used'] == 20
     # with take-apart parts listed, separation evidence is needed: missing fails unless skipped
     write_json(project / 'data' / 'parts.json', [])
     os.remove(rnd / 'separation.json')

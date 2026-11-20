@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from conftest import DIMS, VEHICLE, camera_at, read_json, run_blender, write_json
+from conftest import DIMS, VEHICLE, camera_at, camera_entry, landmark_entry, read_json, run_blender, write_json
 
 pytestmark = pytest.mark.blender
 
@@ -104,11 +104,11 @@ def test_assemble_stops_on_mismatch_order_or_error(blender, project):
     assert 'does not match' in read_json(str(project / 'out' / 'vehicle.blend') + '.json')['problems'][0]
     assert not (project / 'out' / 'vehicle.blend').exists()
     accept(project, 'body', 0, BODY)
-    write_json(project / 'data' / 'build.json', [{'assembly': 'front', 'version': 1}, {'assembly': 'body',
-                                                                                       'version': 0}])
+    write_json(project / 'data' / 'build.json', [{'assembly': 'front', 'version': 1, 'seats': []},
+                                                 {'assembly': 'body', 'version': 0, 'seats': []}])
     ok(run_blender(blender, None, 'assemble.py', '--project', project), 1)
     accept(project, 'body', 0, BODY.replace("ctx.material('body')", "ctx.material('no such slot')"))
-    write_json(project / 'data' / 'build.json', [{'assembly': 'body', 'version': 0}])
+    write_json(project / 'data' / 'build.json', [{'assembly': 'body', 'version': 0, 'seats': []}])
     ok(run_blender(blender, None, 'assemble.py', '--project', project), 1)
     assert read_json(str(project / 'out' / 'vehicle.blend') + '.json')['steps'][0]['status'] == 'failed'
 
@@ -116,8 +116,12 @@ def test_assemble_stops_on_mismatch_order_or_error(blender, project):
 def test_assemble_bad_input(blender, project, tmp_path):
     ok(run_blender(blender, None, 'assemble.py'), 2)
     ok(run_blender(blender, None, 'assemble.py', '--project', project), 2)          # no build.json
-    write_json(project / 'data' / 'build.json', [{'assembly': 'body', 'version': 7}])
+    write_json(project / 'data' / 'build.json', [{'assembly': 'body', 'version': 7, 'seats': []}])
     ok(run_blender(blender, None, 'assemble.py', '--project', project), 2)          # no such accepted version
+    write_json(project / 'data' / 'build.json', [{'assembly': 'body', 'version': 0}])
+    r = run_blender(blender, None, 'assemble.py', '--project', project)
+    ok(r, 2)
+    assert "missing key 'seats'" in r.stderr
 
 
 # ------------------------------------------------------------------ dimensions
@@ -180,20 +184,20 @@ def test_closeups_hide_and_bad_input(blender, scenes, project, tmp_path):
     ok(tool(blender, scenes['plain'], 'closeups.py', project, '--out', tmp_path, '--regions', 'left,underneath'), 2)
     # hiding the only part leaves nothing to look at
     ok(tool(blender, scenes['plain'], 'closeups.py', project, '--out', tmp_path, '--hide', 'body shell'), 2)
+    ok(tool(blender, scenes['plain'], 'closeups.py', project, '--out', tmp_path, '--hide', 'no such part'), 2)
 
 
 # ------------------------------------------------------------------ fairness
 
 def test_fairness_pass_with_marked_crease(blender, scenes, project, tmp_path):
-    ok(tool(blender, scenes['fair'], 'fairness.py', project, '--panels', 'panel_smooth,panel_creased',
-            '--out', tmp_path))
+    ok(tool(blender, scenes['fair'], 'fairness.py', project, '--out', tmp_path))
     p = read_json(tmp_path / 'fairness.json')['panels']
     assert p['panel_smooth']['p99_deg'] < 1.0 and p['panel_smooth']['max_deg'] < 1.0
     assert p['panel_creased']['max_deg'] < 1.0 and p['panel_creased']['crease_edges'] == 40
 
 
 def test_fairness_gate_fails_on_unmarked_fold(blender, scenes, project, tmp_path):
-    ok(tool(blender, scenes['fair'], 'fairness.py', project, '--out', tmp_path), 1)     # every registered panel
+    ok(tool(blender, scenes['fair_bad'], 'fairness.py', project, '--out', tmp_path), 1)
     p = read_json(tmp_path / 'fairness.json')['panels']
     assert set(p) == {'panel_smooth', 'panel_creased', 'panel_unmarked'}
     assert p['panel_unmarked']['max_deg'] == pytest.approx(30.0, abs=0.5) and p['panel_unmarked']['passed'] is False
@@ -201,8 +205,9 @@ def test_fairness_gate_fails_on_unmarked_fold(blender, scenes, project, tmp_path
 
 
 def test_fairness_bad_input(blender, scenes, project, tmp_path):
-    ok(tool(blender, scenes['fair'], 'fairness.py', project, '--panels', 'no_such_panel', '--out', tmp_path), 2)
-    ok(tool(blender, scenes['fair'], 'fairness.py', project, '--creases', 'no_such', '--out', tmp_path), 2)
+    r = tool(blender, scenes['bare'], 'fairness.py', project, '--out', tmp_path)     # nothing registered
+    ok(r, 2)
+    assert 'no panels' in r.stderr
 
 
 # ------------------------------------------------------------------ rays
@@ -210,9 +215,10 @@ def test_fairness_bad_input(blender, scenes, project, tmp_path):
 def top_camera(project):
     R = np.array([[1.0, 0, 0], [0, -1.0, 0], [0, 0, -1.0]])
     from conftest import Camera
-    c = Camera([0.0, 0.0, 3000.0], R, 200.0, 99.5, 49.5, 200, 100).as_dict()
-    c.update(file='refs/photos/top.png', crop=[10, 20, 210, 120], grade='precise')
+    c = camera_entry(Camera([0.0, 0.0, 3000.0], R, 200.0, 99.5, 49.5, 200, 100))
     write_json(project / 'data' / 'cameras.json', {'cameras': {'top': c}})
+    write_json(project / 'data' / 'landmarks.json', [landmark_entry('top', 'refs/photos/top.png',
+                                                                   crop=[10, 20, 210, 120])])
 
 
 def test_rays_pixels_list_every_surface(blender, scenes, project, tmp_path):
@@ -240,8 +246,7 @@ def test_rays_grid_finds_double_skin(blender, scenes, project, tmp_path):
 
 
 def test_rays_grid_single_skin_passes(blender, scenes, project, tmp_path):
-    c = camera_at((-5200.0, -4600.0, 1700.0), f=150.0, w=160, h=100).as_dict()
-    c.update(file='x.png', grade='precise')
+    c = camera_entry(camera_at((-5200.0, -4600.0, 1700.0), f=150.0, w=160, h=100))
     write_json(project / 'data' / 'cameras.json', {'cameras': {'front-34': c}})
     ok(tool(blender, scenes['plain'], 'rays.py', project, '--grid', 12, '--out', tmp_path))
     assert read_json(tmp_path / 'rays.json')['double_skins'] == 0

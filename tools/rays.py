@@ -1,11 +1,12 @@
 """List every surface camera rays pass through, and find double skins.                   (runs in Blender)
 
-usage: blender -b <scene.blend> --python tools/rays.py -- --out DIR [--project DIR] [--cameras FILE]
+usage: blender -b <scene.blend> --python tools/rays.py -- --out DIR [--project DIR] [--cameras FILE] [--landmarks FILE]
        [--grid 64 | --pixels PIXELS_FILE] [--stack-mm 10] [--views a,b] [--max-hits 32] [--name rays]
 
 Cameras come from cameras.json (default <project>/data/cameras.json); each view is rendered at its steer_deg.
 --grid N (the default, 64) traces an N by N grid of rays through each camera. --pixels takes a pixels file: a
 list of {"name", "view", "u", "v"} in file pixels (as in landmarks.json).
+Each view's crop comes from landmarks.json (needed with --pixels), so u, v are file pixels in and out.
 For each ray every surface it passes through is listed in order: object, material, position (mm) and whether it
 faces the camera. With --grid the output is compact: per view, tables of object and material names and one row
 per ray [u, v, [[object index, material index, x, y, z, faces camera], ...]]. With --pixels each pixel gets a
@@ -26,7 +27,8 @@ from mathutils.bvhtree import BVHTree
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _blender as B  # noqa: E402
 import kit  # noqa: E402
-from _common import ArgParser, BadInput, EXIT_GATE, EXIT_OK, load_json, number, save_json  # noqa: E402
+import _formats as F  # noqa: E402
+from _common import ArgParser, BadInput, EXIT_GATE, EXIT_OK, load_json, number, save_json, view_sources  # noqa: E402
 
 USAGE = ('blender -b <scene.blend> --python tools/rays.py -- --out DIR [--project DIR] [--cameras FILE] '
          '[--grid 64 | --pixels PIXELS_FILE] [--stack-mm 10]')
@@ -116,6 +118,7 @@ def main(argv):
     ap.add_argument('--cameras')
     ap.add_argument('--grid', type=int)
     ap.add_argument('--pixels')
+    ap.add_argument('--landmarks')
     ap.add_argument('--views')
     ap.add_argument('--stack-mm', type=float, default=10.0)
     ap.add_argument('--step-mm', type=float, default=0.01)
@@ -131,20 +134,15 @@ def main(argv):
     if a.stack_mm < 0 or a.step_mm <= 0 or a.max_hits < 1:
         raise BadInput('stack, step and max hits must be positive')
     project = B.project_dir(a)
-    cams = load_json(a.cameras or os.path.join(project, 'data', 'cameras.json'), 'cameras file').get('cameras')
-    if not isinstance(cams, dict) or not cams:
-        raise BadInput('cameras.json has no cameras')
+    cams = F.cameras(load_json(a.cameras or os.path.join(project, 'data', 'cameras.json'), 'cameras file'))
+    sources = view_sources(project, a.landmarks, required=bool(a.pixels))
     jobs = {}
     if a.pixels:
-        px = load_json(a.pixels, 'pixels file')
-        if not isinstance(px, list) or not px:
-            raise BadInput('pixels file must be a non-empty list of {name, view, u, v}')
-        for i, e in enumerate(px):
-            if not isinstance(e, dict) or not all(k in e for k in ('view', 'u', 'v')):
-                raise BadInput('pixels entry %d needs view, u and v' % (i + 1))
+        px = F.pixels(load_json(a.pixels, 'pixels file'))
+        for e in px:
             if e['view'] not in cams:
                 raise BadInput('view %r is not in cameras.json' % e['view'])
-            jobs.setdefault(e['view'], []).append((str(e.get('name', '')), number(e['u'], 'u'), number(e['v'], 'v')))
+            jobs.setdefault(e['view'], []).append((str(e['name']), number(e['u'], 'u'), number(e['v'], 'v')))
     else:
         names = B.globs(a.views) or list(cams)
         for v in names:
@@ -167,9 +165,9 @@ def main(argv):
         c = cams[v]
         cam = B.camera_from_view(v, c)
         W, H = int(c['width']), int(c['height'])
-        off = (c.get('crop') or [0, 0])[:2]
+        off = ((sources.get(v, (None, None))[1]) or [0, 0])[:2]
         far = float(np.linalg.norm(hi - lo)) * 4 + (cam.matrix_world.translation - Vector((lo + hi) / 2)).length * 2
-        undo = kit.steer(float(c.get('steer_deg') or 0.0))
+        undo = kit.steer(float(c['steer_deg']))
         try:
             if todo is None:
                 names, mats, rows = [], [], []

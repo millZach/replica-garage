@@ -15,6 +15,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _formats as F  # noqa: E402
 from _common import (ArgParser, BadInput, EXIT_GATE, EXIT_OK, font, load_json, number, open_image, run,  # noqa: E402
                      save_json)
 
@@ -27,7 +28,7 @@ def same(a, b):
 
 
 def marks_for(picture, marks_path):
-    marks = load_json(marks_path, 'marks file')
+    marks = F.marks(load_json(marks_path, 'marks file'))
     if not isinstance(marks, list):
         raise BadInput('marks.json must be a list of marks')
     base = os.path.dirname(os.path.abspath(marks_path))

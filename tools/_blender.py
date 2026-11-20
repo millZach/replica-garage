@@ -286,10 +286,9 @@ def setup_render(s):
 
 def load_finishes(project):
     import kit
+    import _formats as F
     f = kit.read_json(os.path.join(project, 'data', 'finishes.json'))
-    if f is not None and not isinstance(f, dict):
-        raise BadInput('data/finishes.json must hold a JSON object')
-    return f
+    return None if f is None else F.finishes(f)
 
 
 def use_nodes(idblock):
@@ -384,10 +383,15 @@ def apply_mode(mode, look, finishes, lo, hi):
 
 
 def hide_objects(patterns):
-    """Hide objects whose name or registered part name matches. Returns the hidden objects' names."""
+    """Hide the objects registered under matching part names (globs allowed). Returns their names; a pattern
+    that matches no registered part is bad input."""
     hidden = []
+    for pat in patterns or []:
+        if not any(ob.get('rg_part') is not None and match(str(ob['rg_part']), [pat])
+                   for ob in bpy.context.scene.objects):
+            raise BadInput('no registered part matches %r' % pat)
     for ob in bpy.context.scene.objects:
-        if patterns and (match(ob.name, patterns) or match(str(ob.get('rg_part', '')), patterns)) \
+        if patterns and ob.get('rg_part') is not None and match(str(ob['rg_part']), patterns) \
                 and not ob.hide_render:
             ob.hide_render = True
             ob.hide_viewport = True           # also out of the way of every ray the tools cast
@@ -403,11 +407,8 @@ def registered(prop, value=True):
 
 
 def part_objects(name):
-    """Geometry objects registered under a part name, else the object of that name."""
-    obs = [o for o in bpy.context.scene.objects if o.type in GEOMETRY and o.get('rg_part') == name]
-    if not obs and name in bpy.context.scene.objects and bpy.context.scene.objects[name].type in GEOMETRY:
-        obs = [bpy.context.scene.objects[name]]
-    return obs
+    """Geometry objects the kit registered under a part name (ctx.add(obj, part=name))."""
+    return [o for o in bpy.context.scene.objects if o.type in GEOMETRY and o.get('rg_part') == name]
 
 
 def render_to(path):

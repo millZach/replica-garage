@@ -22,6 +22,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _blender as B  # noqa: E402
 import kit  # noqa: E402
+import _formats as F  # noqa: E402
 from _common import ArgParser, BadInput, EXIT_GATE, EXIT_OK, Camera, load_json, save_json  # noqa: E402
 
 USAGE = ('blender -b <scene.blend> --python tools/render_views.py -- --mode lit|clay|zebra --out DIR '
@@ -41,9 +42,7 @@ def main(argv):
     if not a.mode:
         raise BadInput('--mode lit, clay or zebra is needed')
     project = B.project_dir(a)
-    cams = load_json(a.cameras or os.path.join(project, 'data', 'cameras.json'), 'cameras file').get('cameras')
-    if not isinstance(cams, dict) or not cams:
-        raise BadInput('cameras.json has no cameras')
+    cams = F.cameras(load_json(a.cameras or os.path.join(project, 'data', 'cameras.json'), 'cameras file'))
     views = [a.view] if a.view else list(cams)
     if a.view and a.view not in cams:
         raise BadInput('view %r is not in cameras.json' % a.view)
@@ -70,7 +69,7 @@ def main(argv):
         cam = B.camera_from_view(v, c, scale)
         model = Camera.from_dict(c)
         W, H = B.bpy.context.scene.render.resolution_x, B.bpy.context.scene.render.resolution_y
-        undo = kit.steer(float(c.get('steer_deg') or 0.0))
+        undo = kit.steer(float(c['steer_deg']))
         try:
             errs = []
             for X in corners:

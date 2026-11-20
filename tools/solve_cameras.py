@@ -31,8 +31,9 @@ import numpy as np
 from scipy.optimize import least_squares
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _formats as F  # noqa: E402
 from _common import (ArgParser, BadInput, Camera, EXIT_GATE, EXIT_OK, OrthoCamera, look_at, load_json,  # noqa: E402
-                     number, open_image, project_limits, rodrigues, run, save_json)
+                     number, open_image, project_limits, view_sources, rodrigues, run, save_json)
 
 USAGE = ('python tools/solve_cameras.py [--project DIR] [--max-rms-mm N] [--min-precise 3] [--free-centre] '
          '[--triangulate PIXELS_FILE]')
@@ -135,7 +136,7 @@ def read_views(lm, project, full, part, dims):
         if v in seen:
             raise BadInput('view %r is listed twice' % v)
         seen.add(v)
-        kind = e.get('kind', 'photo')
+        kind = e['kind']
         if kind not in ('photo', 'drawing'):
             raise BadInput('view %r: kind must be photo or drawing' % v)
         path = e['file'] if os.path.isabs(e['file']) else os.path.join(project, e['file'])
@@ -149,7 +150,7 @@ def read_views(lm, project, full, part, dims):
                 raise BadInput('view %r: crop must be [u0, v0, u1, v1]' % v)
             if not (0 <= u0 < u1 <= W and 0 <= v0 < v1 <= H):
                 raise BadInput('view %r: crop lies outside the %dx%d file' % (v, W, H))
-        steer = number(e.get('steer_deg', 0.0), 'steer_deg')
+        steer = number(e['steer_deg'], 'steer_deg')
         pts = e.get('points')
         if not isinstance(pts, dict):
             raise BadInput('view %r needs a "points" object' % v)
@@ -412,13 +413,11 @@ def grade(m, p, X, v, limit, allX):
 
 # ------------------------------------------------------------------ triangulate
 
-def triangulate(cams_file, pixels_file):
-    d = load_json(cams_file, 'cameras file')
-    cams = d.get('cameras') if isinstance(d, dict) else None
-    if not isinstance(cams, dict) or not cams:
-        raise BadInput('%s has no solved cameras' % cams_file)
-    px = load_json(pixels_file, 'pixels file')
-    if not isinstance(px, list) or not px:
+def triangulate(cams_file, pixels_file, project, landmarks_path):
+    cams = F.cameras(load_json(cams_file, 'cameras file'))
+    px = F.pixels(load_json(pixels_file, 'pixels file'))
+    sources = view_sources(project, landmarks_path)
+    if not px:
         raise BadInput('pixels file must be a non-empty list of {name, view, u, v}')
     groups = {}
     for i, e in enumerate(px):
@@ -427,7 +426,7 @@ def triangulate(cams_file, pixels_file):
         if e['view'] not in cams:
             raise BadInput('view %r is not in %s' % (e['view'], cams_file))
         c = cams[e['view']]
-        off = (c.get('crop') or [0, 0])[:2]
+        off = ((sources.get(e['view'], (None, None))[1]) or [0, 0])[:2]
         groups.setdefault(str(e['name']), []).append(
             (e['view'], Camera.from_dict(c), np.array([number(e['u'], 'u') - off[0], number(e['v'], 'v') - off[1]])))
     out = {}
@@ -473,9 +472,9 @@ def main(argv):
         raise BadInput('project folder not found: %s' % project)
     dst = a.out or os.path.join(project, 'data', 'cameras.json')
     if a.triangulate:
-        return triangulate(dst, a.triangulate)
-    vehicle = load_json(a.vehicle or os.path.join(project, 'data', 'vehicle.json'), 'vehicle.json')
-    lm = load_json(a.landmarks or os.path.join(project, 'data', 'landmarks.json'), 'landmarks.json')
+        return triangulate(dst, a.triangulate, project, a.landmarks)
+    vehicle = F.vehicle(load_json(a.vehicle or os.path.join(project, 'data', 'vehicle.json'), 'vehicle.json'))
+    lm = F.landmarks(load_json(a.landmarks or os.path.join(project, 'data', 'landmarks.json'), 'landmarks.json'))
     full, part, guess, dims = named_points(vehicle)
     limit = camera_limit(project, a.max_rms_mm)
     views = read_views(lm, project, full, part, dims)

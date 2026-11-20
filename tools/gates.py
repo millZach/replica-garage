@@ -1,6 +1,6 @@
 """Judge one frozen round against the gate limits.
 
-usage: python tools/gates.py <evidence/round-NN> [--limits FILE] [--skip gate,gate]
+usage: python tools/gates.py <evidence/round-NN> [--limits FILE] [--min-precise 3] [--skip gate,gate]
 
 Reads the tools' results anywhere in the round folder: cameras.json (else <project>/data/cameras.json),
 dimensions.json, outline.json, fairness.json, seating*.json, rays*.json, separation.json. Limits: the defaults in
@@ -9,7 +9,7 @@ default is printed and recorded. Each value is judged here against those limits;
 used.
 
 Gates (limit names as in default_limits.json):
-  cameras      at least min_precise_views views whose RMS is within camera_rms_mm (and not graded flat)
+  cameras      at least --min-precise (default 3) views whose RMS is within camera_rms_mm (and not flat)
   dimensions   each maker's dimension within dimension_error_mm (estimated ones are left out)
   outline      each precise view: median within outline_median_px and 95th percentile within outline_p95_px,
                at outline_ref_width_px image width
@@ -27,6 +27,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _formats as F  # noqa: E402
 from _common import (ArgParser, BadInput, DEFAULT_LIMITS, EXIT_GATE, EXIT_OK, TOOLS_DIR, load_json,  # noqa: E402
                      project_limits, read_limits, run, save_json)
 
@@ -51,7 +52,7 @@ def num(v):
     return None if v is None else float(v)
 
 
-def collect(rnd, project, L):
+def collect(rnd, project, L, min_precise):
     rows = []
 
     def add(gate, item, measured, limit, passed, source, counted=True, **extra):
@@ -65,19 +66,15 @@ def collect(rnd, project, L):
     if not cams and os.path.isfile(os.path.join(project, 'data', 'cameras.json')):
         cams = [os.path.join(project, 'data', 'cameras.json')]
     for p in cams[:1]:
-        d = load_json(p)
-        if not isinstance(d.get('cameras'), dict):
-            bad(p, 'no "cameras" object')
+        cams = F.cameras(load_json(p), os.path.relpath(p, project))
         n = 0
-        for v, c in d['cameras'].items():
-            if c.get('rms_mm') is None:
-                bad(p, 'camera %r has no rms_mm' % v)
+        for v, c in cams.items():
             precise = float(c['rms_mm']) <= L['camera_rms_mm'] and not c.get('planar', False)
             grades[v] = 'precise' if precise else 'visual'
             n += precise
             add('cameras', v, float(c['rms_mm']), L['camera_rms_mm'], precise, p, counted=False, unit='mm',
                 grade=grades[v])
-        add('cameras', 'precise views', n, L['min_precise_views'], n >= L['min_precise_views'], p, unit='views')
+        add('cameras', 'precise views', n, min_precise, n >= min_precise, p, unit='views')
 
     for p in find(rnd, lambda n: n == 'dimensions.json'):
         d = load_json(p)
@@ -161,6 +158,7 @@ def main(argv):
     ap.add_argument('round')
     ap.add_argument('--limits')
     ap.add_argument('--skip', default='')
+    ap.add_argument('--min-precise', type=int, default=3)
     a = ap.parse(argv)
     rnd = os.path.abspath(a.round)
     if not os.path.isdir(rnd):
@@ -180,7 +178,7 @@ def main(argv):
         print('changed limit: %s %g -> %g' % (k, c['default'], c['used']))
     for s in skip:
         print('skipped gate:', s)
-    rows = [r for r in collect(rnd, project, L) if r['gate'] not in skip]
+    rows = [r for r in collect(rnd, project, L, a.min_precise) if r['gate'] not in skip]
     for r in rows:
         if isinstance(r['measured'], float) and not math.isfinite(r['measured']):
             r['measured'] = None

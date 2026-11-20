@@ -22,7 +22,8 @@ usage when run with no arguments.
 | `wait_for.py` | Python | Wait until a file exists and has stopped changing. |
 
 Also here: `kit.py`, what every module's `build(ctx)` receives and the studio presets; `default_limits.json`, the
-starting gate limits; `_common.py` and `_blender.py`, shared code that is not run on its own.
+starting gate limits; `_formats.py`, the checks for every file format in the contract; `_common.py` and
+`_blender.py`, shared code. The three underscore files are not run on their own.
 
 Blender tools run in background mode: `blender -b [file.blend] --python tools/<tool>.py -- <arguments>`. Tools
 find the project as the folder above `tools/`, or take `--project`.

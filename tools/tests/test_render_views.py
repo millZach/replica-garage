@@ -5,7 +5,8 @@ import numpy as np
 import pytest
 from PIL import Image, ImageDraw
 
-from conftest import BOX, OrthoCamera, camera_at, read_json, run_blender, run_tool, write_json
+from conftest import (BOX, OrthoCamera, camera_at, camera_entry, landmark_entry, read_json, run_blender,
+                      run_tool, write_json)
 
 pytestmark = pytest.mark.blender
 
@@ -31,12 +32,11 @@ def cameras(project, away=False, steer=0.0):
     }
     if away:
         cams['side'] = camera_at((1200.0, -9000.0, 800.0), at=(1200.0, -20000.0, 800.0), f=160.0, w=160, h=100)
-    d = {'cameras': {}}
-    for k, c in cams.items():
-        e = c.as_dict()
-        e.update(file='refs/photos/%s.png' % k, crop=None, grade='precise', steer_deg=steer)
-        d['cameras'][k] = e
-    write_json(project / 'data' / 'cameras.json', d)
+    write_json(project / 'data' / 'cameras.json', {'cameras': {k: camera_entry(c, steer=steer)
+                                                               for k, c in cams.items()}})
+    write_json(project / 'data' / 'landmarks.json',
+               [landmark_entry(k, 'refs/photos/%s.png' % k, 'drawing' if k == 'elevation' else 'photo')
+                for k in cams])
     return cams
 
 
@@ -98,8 +98,7 @@ def test_render_views_lit_trial_and_settings_reuse(blender, scenes, project):
 def test_render_views_steering(blender, scenes, project):
     front = camera_at((-6000.0, 0.0, 75.0), at=(0.0, 0.0, 75.0), f=400.0, w=160, h=100)   # under the body
     for steer, name in ((0.0, 'straight'), (30.0, 'steered')):
-        e = front.as_dict()
-        e.update(steer_deg=steer, grade='precise')
+        e = camera_entry(front, steer=steer)
         write_json(project / 'data' / 'cameras.json', {'cameras': {'front': e}})
         r = render(blender, scenes['car'], project, project / name, '--mode', 'clay', '--samples', 1)
         assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]

@@ -1,21 +1,35 @@
 """The kit: what every module's build(ctx) receives, and the looks and studios the render tools use. (Blender)
 
-A module is src/<assembly>.py (or its frozen copy under accepted/) with one function:
+A module is src/<assembly>.py (frozen, once accepted, as accepted/<assembly>/NN/<assembly>.py) with one function,
+build(ctx). assemble.py runs the modules in data/build.json order in a clean scene and saves the result, so a
+module only makes objects: it never opens, saves or clears a scene.
 
-    def build(ctx):
-        body = make_my_shell(ctx)                       # your own bpy code, in scene units (metres)
-        ctx.add(body, part='body shell', panel=True)    # painted skin: judged for fairness and double skins
-        ctx.crease(body, sharp_edge_indices)            # real creases, left out of the fairness gate
-        body.data.materials.append(ctx.material('body'))
+    import bpy
 
-Scene units are metres; ctx.mm(value) turns millimetres (the unit of every file) into scene units. Vehicle axes:
-origin on the ground under the middle of the front axle, X toward the rear, Y toward the right, Z up.
+    def build(ctx):                                     # src/body.py
+        shell = make_shell(ctx)                         # your own bpy code, in scene units (metres)
+        shell.data.materials.append(ctx.material('body'))
+        ctx.add(shell, part='body shell', panel=True)   # painted skin: judged for fairness and double skins
+        ctx.crease(shell, character_line_edges)         # real creases, left out of the fairness gate
 
-What the kit records, so the tools can read it back from the saved scene (custom properties on each object):
+    def build(ctx):                                     # src/front.py, manifest depends_on ["body"]
+        hit = ctx.body.hit(ctx.mm([-2000, -600, 650]), (1, 0, 0))   # where the skin is, ahead of the lamp
+        lamp = make_lamp(hit[0], hit[1])
+        lamp.data.materials.append(ctx.material('glass'))
+        ctx.add(lamp, part='headlamp_l')                # build.json seats it: {"part": "headlamp_l", "on": ...}
+
+Units: every file is in millimetres; scenes are in metres; ctx.mm(value) converts. Vehicle axes: origin on the
+ground under the middle of the front axle, X toward the rear, Y toward the vehicle's right, Z up.
+
+What the kit records, so the tools find panels, creases and parts in the saved scene without name lists
+(custom properties on each object):
   rg_assembly  the assembly that added it        rg_part      its part name (default: the object's name)
   rg_panel     painted skin                       rg_separable a part that comes off (take-apart levels 2, 3)
   rg_steer     "left" or "right" for a steerable front wheel (it turns about its own origin's vertical axis)
-and a boolean edge attribute rg_crease on each mesh with creases.
+and the boolean edge attribute rg_crease on each mesh with creases.
+
+The render tools also use apply_look() and build_studio() here: a look sets every slot material from
+data/finishes.json; a studio preset (soft, gloss, dark-paint) lights the vehicle for lit renders.
 """
 import json
 import math
@@ -229,11 +243,20 @@ def steer(angle_deg):
 
 # ------------------------------------------------------------------ surfaces
 
-class Surface:
-    """Where an assembly's surface is, from every object it registered (world space, scene units)."""
+class BodySurface:
+    """ctx.body: where the painted skin built so far is, for parts that must sit on it or follow it.
 
-    def __init__(self, assembly):
-        self.assembly = assembly
+    The surface is every object registered with ctx.add(..., panel=True) by the assemblies built before the
+    current one (and by the current one, up to the call). It is gathered again whenever a panel is added, so a
+    query always sees the panels as they stand. All positions and directions are in scene units (metres), world
+    space; use ctx.mm() to turn millimetres into scene units.
+
+    Both queries return (location, normal, object name), with location and normal as mathutils Vectors and the
+    normal pointing out of the painted side, or None when nothing is found within `distance`. Asking before any
+    panel exists raises RuntimeError: build the body first and list it in your manifest's depends_on.
+    """
+
+    def __init__(self):
         self._bvh = None
         self._names = []
 
@@ -243,7 +266,7 @@ class Surface:
         dg = bpy.context.evaluated_depsgraph_get()
         verts, tris, owner = [], [], []
         for ob in bpy.context.scene.objects:
-            if ob.get('rg_assembly') != self.assembly or ob.type not in ('MESH', 'CURVE', 'SURFACE', 'FONT', 'META'):
+            if not ob.get('rg_panel') or ob.type not in ('MESH', 'CURVE', 'SURFACE', 'FONT', 'META'):
                 continue
             ev = ob.evaluated_get(dg)
             me = ev.to_mesh()
@@ -258,21 +281,29 @@ class Surface:
             finally:
                 ev.to_mesh_clear()
         if not tris:
-            raise RuntimeError('the %s is not built yet: build it before the assemblies that sit on it'
-                               % self.assembly)
+            raise RuntimeError('ctx.body: no painted panel has been built yet; build the body first and list it '
+                               'in depends_on')
         self._bvh, self._names = BVHTree.FromPolygons(verts, tris), owner
         return self._bvh
 
     def reset(self):
+        """Drop the gathered surface so the next query gathers it again (done whenever a panel is added)."""
         self._bvh = None
 
     def hit(self, origin, direction, distance=1e6):
-        """First point where a ray meets the surface: (location, normal, object name), or None."""
+        """The first point where the ray from `origin` along `direction` meets the painted skin.
+
+        origin, direction: 3-sequences in scene units (direction need not be unit length).
+        Returns (location, normal, object name), or None if the ray meets nothing within `distance`.
+        """
         loc, nor, idx, _ = self._tree().ray_cast(Vector(origin), Vector(direction).normalized(), distance)
         return None if loc is None else (loc, nor, self._names[idx])
 
     def nearest(self, point, distance=1e6):
-        """Nearest point on the surface: (location, normal, object name), or None."""
+        """The point of the painted skin nearest to `point` (scene units).
+
+        Returns (location, normal, object name), or None if nothing lies within `distance`.
+        """
         loc, nor, idx, _ = self._tree().find_nearest(Vector(point), distance)
         return None if loc is None else (loc, nor, self._names[idx])
 
@@ -280,7 +311,18 @@ class Surface:
 # ------------------------------------------------------------------ the context
 
 class Context:
-    """Passed to each module's build(ctx) by assemble.py."""
+    """The ctx every module's build(ctx) receives from assemble.py.
+
+    Attributes
+      ctx.vehicle     vehicle.json as a dict (maker, model, ..., "dimensions", "points"), millimetres.
+      ctx.dimensions  ctx.vehicle["dimensions"], e.g. ctx.dimensions["wheelbase"].
+      ctx.look        the name of the look being built (assemble.py --look, default finishes.json proof_look).
+      ctx.assembly    the assembly whose build(ctx) is running.
+      ctx.body        the painted skin built so far: ctx.body.hit(...) and ctx.body.nearest(...) (BodySurface).
+
+    Methods: ctx.mm, ctx.add, ctx.crease, ctx.material, ctx.steerable, ctx.part. Everything a module makes must
+    pass through ctx.add, or the tools will not see it as part of the vehicle's registered parts.
+    """
 
     def __init__(self, vehicle=None, finishes=None, look=None, parts=None):
         self.vehicle = vehicle or {}
@@ -289,13 +331,16 @@ class Context:
         self.look, self._look = look_of(finishes, look) if finishes else (None, None)
         self.parts = {p['part']: p for p in (parts or []) if isinstance(p, dict) and 'part' in p}
         self.assembly = None
-        self.body = Surface('body')
+        self.body = BodySurface()
         self.warnings = []
         self.added = {}
 
-    # units
     def mm(self, value):
-        """Millimetres to scene units. Works on a number or a sequence."""
+        """Millimetres to scene units (metres in every scene the kit builds).
+
+        Takes a number, a list or tuple (returns a list), a NumPy array or a mathutils Vector.
+        Example: ctx.mm(ctx.dimensions["wheelbase"]) -> 2.5 for a 2500 mm wheelbase.
+        """
         k = 1.0 / mm_per_unit()
         if isinstance(value, (Vector, np.ndarray)):
             return value * k
@@ -303,10 +348,23 @@ class Context:
             return [v * k for v in value]
         return value * k
 
-    # registration
     def add(self, obj, part=None, panel=False, separable=False, pivot=None):
-        """Register obj under the calling assembly. pivot: [x, y, z] in mm (as in parts.json); the object's
-        origin is moved there without moving its geometry."""
+        """Register an object as part of the calling assembly, linking it into the scene if it is not yet.
+
+        obj        a Blender object (usually a mesh) you made in build(ctx).
+        part       the part's name, the one build.json seats, parts.json and the judge use (default: obj.name).
+                   Several objects may share one part name, but a part that comes off (separable) must be one
+                   object.
+        panel      True for painted skin. Panels are judged for fairness and double skins, and become part of
+                   ctx.body for the assemblies built after this one.
+        separable  True for a part that comes off at take-apart level 2 or 3 (listed in data/parts.json).
+        pivot      [x, y, z] in millimetres, vehicle coordinates: the hinge or hub the part turns about. The
+                   object's origin is moved there without moving its geometry. Pass the one from parts.json:
+                   ctx.add(door, part="door_l", separable=True, pivot=ctx.part("door_l")["pivot"]).
+
+        Recorded on the object as custom properties rg_assembly, rg_part, rg_panel and rg_separable.
+        Returns obj.
+        """
         if self.assembly is None:
             raise RuntimeError('ctx.add is only for use inside build(ctx)')
         sc = bpy.context.scene
@@ -321,50 +379,55 @@ class Context:
         obj['rg_panel'] = bool(panel)
         obj['rg_separable'] = bool(separable)
         if pivot is not None:
-            self.set_pivot(obj, pivot)
+            self._set_pivot(obj, pivot)
         self.added.setdefault(self.assembly, []).append(obj.name)
-        if self.assembly == 'body':
+        if panel:
             self.body.reset()
         return obj
 
-    def set_pivot(self, obj, pivot_mm):
-        p = Vector(self.mm(list(map(float, pivot_mm))))
+    def _set_pivot(self, obj, pivot_mm):
+        if len(pivot_mm) != 3:
+            raise ValueError('pivot must be [x, y, z] in mm')
+        p = Vector(self.mm([float(c) for c in pivot_mm]))
         bpy.context.view_layer.update()
-        cur = obj.matrix_world.translation.copy()
-        delta_world = p - cur
+        delta = p - obj.matrix_world.translation
         if obj.type == 'MESH' and obj.data is not None:
-            local = obj.matrix_world.to_3x3().inverted() @ delta_world
-            obj.data.transform(Matrix.Translation(-local))
+            obj.data.transform(Matrix.Translation(-(obj.matrix_world.to_3x3().inverted() @ delta)))
             obj.data.update()
         obj.matrix_world.translation = p
         bpy.context.view_layer.update()
 
     def crease(self, obj, edges):
-        """Mark edges of a mesh as real creases: edge indices, or (vertex, vertex) pairs."""
+        """Mark edges of a mesh as real creases, so the fairness gate leaves them (and their neighbours) out.
+
+        edges: edge indices (ints) or pairs of vertex indices (a, b) of obj's mesh. A crease is a line the real
+        vehicle has: a character line, a panel's folded edge. Do not mark a kink to hide it.
+        Recorded as the boolean edge attribute rg_crease, which survives modifiers that keep edge attributes.
+        """
         me = obj.data
         at = me.attributes.get(CREASE)
         if at is None or at.domain != 'EDGE' or at.data_type != 'BOOLEAN':
             at = me.attributes.new(CREASE, 'BOOLEAN', 'EDGE')
         by_pair = None
         for e in edges:
-            if isinstance(e, int):
-                at.data[e].value = True
+            if isinstance(e, (int, np.integer)):
+                at.data[int(e)].value = True
                 continue
             if by_pair is None:
                 by_pair = {frozenset(ed.vertices): ed.index for ed in me.edges}
-            i = by_pair.get(frozenset(e))
+            i = by_pair.get(frozenset(int(v) for v in e))
             if i is None:
                 raise ValueError('no edge between vertices %r on %s' % (tuple(e), obj.name))
             at.data[i].value = True
 
-    def steerable(self, obj, side):
-        """A front wheel that turns with the steering; its origin must sit on the steering axis."""
-        if side not in ('left', 'right'):
-            raise ValueError('side must be "left" or "right"')
-        obj['rg_steer'] = side
-
     def material(self, slot):
-        """The material for a slot in the current look (one material per slot; a look changes only its values)."""
+        """The material for a slot (body, wheel, caliper, glass, trim, seat, ...) in the current look.
+
+        There is one material per slot, named after the slot, holding the slot's settings from
+        data/finishes.json for ctx.look. Assign it with obj.data.materials.append(ctx.material("body")).
+        Changing look rewrites the materials' settings and changes no geometry. A slot the look does not list
+        raises KeyError (add it to every look in finishes.json). With no finishes.json the material is plain grey.
+        """
         m = bpy.data.materials.get(slot)
         if m is None:
             m = bpy.data.materials.new(slot)
@@ -380,8 +443,19 @@ class Context:
         m['rg_slot'] = slot
         return m
 
+    def steerable(self, obj, side):
+        """Register a front wheel (side "left" or "right") that turns with the steering.
+
+        Renders turn it by each view's steer_deg about the vertical axis through its origin, so put the origin
+        on the steering axis (the wheel's centre). Recorded as the custom property rg_steer.
+        """
+        if side not in ('left', 'right'):
+            raise ValueError('side must be "left" or "right"')
+        obj['rg_steer'] = side
+
     def part(self, name):
-        """The parts.json entry for a part (its pivot is in mm, ready for ctx.add(pivot=...))."""
+        """The data/parts.json entry for a part that comes off: {"part", "fixed_to", "pivot" (mm), "level",
+        "basis"}. Raises KeyError for a part parts.json does not list."""
         if name not in self.parts:
             raise KeyError('part %r is not in data/parts.json' % name)
         return self.parts[name]

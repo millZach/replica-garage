@@ -6,7 +6,7 @@ usage: blender -b <scene.blend> --python tools/separation.py -- --level 2|3 --ou
 
 parts.json (default <project>/data/parts.json) is a list of {"part", "fixed_to", "pivot": [x, y, z] mm,
 "level": 2 | 3, "basis"}; --level 2 checks the level 2 parts, --level 3 all of them. For each part: it is its own
-object (exactly one geometry object registered under that part name, or with that name), and that object's origin
+object (exactly one geometry object registered under that part name, with separable=True), and its origin
 is within --pivot-tolerance-mm of the pivot in parts.json. For each pair of parts whose bounding boxes touch, the
 overlap is the deepest one reaches into the other: vertices inside a closed (watertight) part, measured to its
 surface, and for crossing surfaces the depth of the crossing triangles behind each other (a finer mesh gives a
@@ -27,6 +27,7 @@ from mathutils.bvhtree import BVHTree
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _blender as B  # noqa: E402
+import _formats as F  # noqa: E402
 from _common import ArgParser, BadInput, EXIT_GATE, EXIT_OK, load_json, number, save_json  # noqa: E402
 
 USAGE = ('blender -b <scene.blend> --python tools/separation.py -- --level 2|3 --out DIR [--project DIR] '
@@ -75,8 +76,8 @@ def overlap_depth(A, C, far):
 
 
 def read_parts(path, level):
-    d = load_json(path, 'parts.json')
-    if not isinstance(d, list) or not d:
+    d = F.parts(load_json(path, 'parts.json'))
+    if not d:
         raise BadInput('parts.json must be a non-empty list of parts')
     out = []
     for i, p in enumerate(d):
@@ -138,8 +139,11 @@ def main(argv):
         else:
             pivot_ok = False
             row['note'] = 'parts.json gives no pivot'
-        own = len(p.md.tris) > 0 and not any(o is not obs[0] and o.data is obs[0].data
-                                             for o in B.bpy.context.scene.objects if o.type == obs[0].type)
+        sep = bool(obs[0].get('rg_separable', False))
+        own = len(p.md.tris) > 0 and sep and not any(o is not obs[0] and o.data is obs[0].data
+                                                     for o in B.bpy.context.scene.objects if o.type == obs[0].type)
+        if not sep:
+            row['note'] = 'not registered as separable (ctx.add(..., separable=True))'
         row.update(own_object=bool(own), pivot_ok=bool(pivot_ok), pivot_mm=piv.tolist(), closed=p.closed,
                    separable_flag=bool(obs[0].get('rg_separable', False)), bbox_min_mm=(p.lo * u).tolist(),
                    bbox_max_mm=(p.hi * u).tolist())

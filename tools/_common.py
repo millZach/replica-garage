@@ -241,6 +241,17 @@ def view_picture(project, file, crop=None, what='picture'):
     return im, (0, 0)
 
 
+def view_sources(project, path=None, required=False):
+    """{view: (file, crop)} from landmarks.json (cameras.json does not say which file a view is from)."""
+    import _formats as F
+    p = path or os.path.join(project, 'data', 'landmarks.json')
+    if not os.path.isfile(p):
+        if required:
+            raise BadInput('landmarks.json not found: %s' % p)
+        return {}
+    return {e['view']: (e['file'], e.get('crop')) for e in F.landmarks(load_json(p, 'landmarks.json'))}
+
+
 def find_image(folder, stem, exts=('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.webp', '.bmp')):
     """The file in `folder` named <stem>.<ext>, or None."""
     for e in exts:
@@ -277,7 +288,6 @@ def mask_boundary(mask):
 
 DEFAULT_LIMITS = {
     'camera_rms_mm': 12.0,
-    'min_precise_views': 3,
     'dimension_error_mm': 10.0,
     'outline_median_px': 3.0,
     'outline_p95_px': 8.0,
@@ -297,8 +307,6 @@ def read_limits(path):
         raise BadInput('%s must hold a JSON object of gate: number' % path)
     out = {}
     for k, v in d.items():
-        if k.startswith('_'):
-            continue                                    # comments
         if k not in DEFAULT_LIMITS:
             raise BadInput('%s: unknown limit %r (known: %s)' % (path, k, ', '.join(DEFAULT_LIMITS)))
         out[k] = number(v, k)

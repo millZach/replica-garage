@@ -107,3 +107,17 @@ def scenes(blender, tmp_path_factory):
     if r.returncode != 0:
         raise RuntimeError('scene build failed:\n' + r.stdout[-3000:] + r.stderr[-3000:])
     return {os.path.splitext(n)[0]: str(out / n) for n in os.listdir(out) if n.endswith('.blend')}
+
+
+def camera_entry(cam, steer=0.0, grade='precise', rms_mm=1.0, rms_px=0.5, **extra):
+    """A cameras.json entry with every key the contract lists."""
+    e = cam.as_dict()
+    e.update(steer_deg=steer, grade=grade, rms_mm=rms_mm, rms_px=rms_px, **extra)
+    return e
+
+
+def landmark_entry(view, file, kind='photo', crop=None, points=None, steer=0.0):
+    e = dict(view=view, file=file, kind=kind, steer_deg=steer, points=points or {})
+    if crop:
+        e['crop'] = crop
+    return e

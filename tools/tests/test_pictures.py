@@ -4,7 +4,7 @@ import os
 import numpy as np
 from PIL import Image, ImageDraw
 
-from conftest import read_json, run_tool, write_json
+from conftest import Camera, camera_entry, landmark_entry, read_json, run_tool, write_json
 
 W, H = 400, 250
 
@@ -42,8 +42,7 @@ def render_of(mask):
 
 
 def landmarks(project, entries):
-    write_json(project / 'data' / 'landmarks.json',
-               [dict(view=v, file=f, kind=k, points={}, **({'crop': c} if c else {})) for v, f, k, c in entries])
+    write_json(project / 'data' / 'landmarks.json', [landmark_entry(v, f, k, c) for v, f, k, c in entries])
 
 
 # ------------------------------------------------------------------ mask_photo
@@ -105,9 +104,11 @@ def setup_compare(project, shift, grade='precise'):
     sil = silhouette()
     photo_of(sil).save(project / 'refs' / 'photos' / 'side.jpg', quality=95)
     sil.save(project / 'refs' / 'masks' / 'side.png')
-    write_json(project / 'data' / 'cameras.json', {'cameras': {
-        'side': {'file': 'refs/photos/side.jpg', 'crop': None, 'width': W, 'height': H, 'grade': grade},
-        'top': {'file': 'refs/photos/side.jpg', 'crop': None, 'width': W, 'height': H, 'grade': 'visual'}}})
+    cam = Camera([0.0, -9000.0, 600.0], [[1, 0, 0], [0, 0, -1], [0, 1, 0]], 500.0, (W - 1) / 2, (H - 1) / 2, W, H)
+    write_json(project / 'data' / 'cameras.json', {'cameras': {'side': camera_entry(cam, grade=grade),
+                                                               'top': camera_entry(cam, grade='visual')}})
+    landmarks(project, [('side', 'refs/photos/side.jpg', 'photo', None),
+                        ('top', 'refs/photos/side.jpg', 'photo', None)])
     rd = project / 'evidence' / 'round-01' / 'clay'
     os.makedirs(rd, exist_ok=True)
     # renders may be at another scale than the picture: half size here (a trial render)
@@ -146,6 +147,11 @@ def test_compare_bad_input(project):
     Image.open(rd / 'side.png').convert('RGB').save(rd / 'side.png')        # no alpha: no silhouette
     r = compare(project, rd)
     assert r.returncode == 2 and 'alpha' in r.stderr
+    cams = read_json(project / 'data' / 'cameras.json')
+    del cams['cameras']['side']['grade']
+    write_json(project / 'data' / 'cameras.json', cams)
+    r = compare(project, rd)
+    assert r.returncode == 2 and "missing key 'grade'" in r.stderr
     assert run_tool('compare.py').returncode == 2
 
 

@@ -25,6 +25,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _blender as B  # noqa: E402
+import _formats as F  # noqa: E402
 from _common import ArgParser, BadInput, EXIT_GATE, EXIT_OK, load_json, number, project_limits, save_json  # noqa: E402
 
 USAGE = ('blender -b <scene.blend> --python tools/dimensions.py -- --out DIR [--project DIR] [--vehicle FILE] '
@@ -81,7 +82,7 @@ def main(argv):
     B.add_project_arg(ap)
     a = ap.parse(argv)
     project = B.project_dir(a)
-    veh = load_json(a.vehicle or os.path.join(project, 'data', 'vehicle.json'), 'vehicle.json')
+    veh = F.vehicle(load_json(a.vehicle or os.path.join(project, 'data', 'vehicle.json'), 'vehicle.json'))
     limit = a.max_error_mm if a.max_error_mm is not None else project_limits(project)[0]['dimension_error_mm']
     estimated = veh.get('estimated', []) if isinstance(veh, dict) else []
     if not isinstance(estimated, list):

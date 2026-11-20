@@ -69,7 +69,7 @@ def write_landmarks(project, noise=0.3, seed=1, drop=None, focal_side=False):
     f = 'refs/blueprints/sheet.png'
     blank_picture(project / f, 500, 200, (255, 255, 255))
     uv = dcam.project(np.array([pts[n] for n in SIDE_POINTS])) + rng.normal(0, noise, (len(SIDE_POINTS), 2))
-    lm.append(dict(view='side-drawing', file=f, kind='drawing',
+    lm.append(dict(view='side-drawing', file=f, kind='drawing', steer_deg=0,
                    points={n: [float(a), float(b)] for n, (a, b) in zip(SIDE_POINTS, uv)}))
     if drop:
         for e in lm:
@@ -148,7 +148,18 @@ def test_bad_input(project):
     write_json(project / 'data' / 'landmarks.json', lm)
     r = run_tool('solve_cameras.py', '--project', project)
     assert r.returncode == 2 and 'no_such_point' in r.stderr
-    os.remove(project / 'refs' / 'photos' / 'side-left.png')
+    write_landmarks(project)
+    lm = read_json(project / 'data' / 'landmarks.json')
+    del lm[1]['steer_deg']
+    write_json(project / 'data' / 'landmarks.json', lm)
+    r = run_tool('solve_cameras.py', '--project', project)
+    assert r.returncode == 2 and "missing key 'steer_deg'" in r.stderr
+    v = read_json(project / 'data' / 'vehicle.json')
+    del v['trim']
+    write_json(project / 'data' / 'vehicle.json', v)
+    r = run_tool('solve_cameras.py', '--project', project)
+    assert r.returncode == 2 and "missing key 'trim'" in r.stderr
+    write_json(project / 'data' / 'vehicle.json', dict(v, trim='test'))
     write_landmarks(project)
     os.remove(project / 'refs' / 'photos' / 'side-left.png')
     assert run_tool('solve_cameras.py', '--project', project).returncode == 2

@@ -1,17 +1,15 @@
 """Measure how fair each painted panel is: the angle between neighbouring faces, away from real creases. (Blender)
 
-usage: blender -b <scene.blend> --python tools/fairness.py -- --out DIR [--panels names] [--creases names]
-       [--crease-margin-mm 10] [--max-p99-deg 2.5] [--max-deg 5] [--base-mesh]
+usage: blender -b <scene.blend> --python tools/fairness.py -- --out DIR [--project DIR] [--crease-margin-mm 10]
+       [--max-p99-deg 2.5] [--max-deg 5] [--base-mesh]
 
-Panels are the objects the kit registered as painted skin (ctx.add(..., panel=True)); --panels (names or globs)
-measures others instead. Creases are the edges marked with ctx.crease (the rg_crease edge attribute); --creases
-adds more by name: a boolean edge attribute or a vertex group on the panel's mesh (an edge is in a group when both
-its ends are), or "sharp" for edges marked sharp. A name given with --creases and found on no panel is bad input.
-Every edge within --crease-margin-mm of a crease is left out, so the fold and the faces rolling into it are not
-counted. For every edge shared by exactly two faces the angle between the two face normals is taken; per panel the
-99th percentile and the maximum are reported, with where the maximum is (mm). The evaluated mesh (as it renders)
-is measured; --base-mesh measures the mesh as modelled, for when a modifier drops the crease marks.
-Writes <out>/fairness.json. Exit 1 when any panel is over either limit, 2 on bad input (no panels found).
+The panels are the objects the kit registered as painted skin (ctx.add(..., panel=True)); the creases are the
+edges marked with ctx.crease (the rg_crease edge attribute). Every edge within --crease-margin-mm of a crease is
+left out, so the fold and the faces rolling into it are not counted. For every edge shared by exactly two faces
+the angle between the two face normals is taken; per panel the 99th percentile and the maximum are reported, with
+where the maximum is (mm). The evaluated mesh (as it renders) is measured; --base-mesh measures the mesh as
+modelled, for when a modifier drops the crease marks.
+Writes <out>/fairness.json. Exit 1 when any panel is over either limit, 2 on bad input (no registered panels).
 """
 import os
 import sys
@@ -22,8 +20,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _blender as B  # noqa: E402
 from _common import ArgParser, BadInput, EXIT_GATE, EXIT_OK, save_json  # noqa: E402
 
-USAGE = ('blender -b <scene.blend> --python tools/fairness.py -- --out DIR [--panels names] [--creases names] '
-         '[--crease-margin-mm 10] [--max-p99-deg 2.5] [--max-deg 5]')
+USAGE = ('blender -b <scene.blend> --python tools/fairness.py -- --out DIR [--project DIR] '
+         '[--crease-margin-mm 10] [--max-p99-deg 2.5] [--max-deg 5] [--base-mesh]')
 
 
 class BaseMesh(B.MeshData):
@@ -109,9 +107,7 @@ def measure(md, creases, margin):
 
 def main(argv):
     ap = ArgParser(usage_line=USAGE)
-    ap.add_argument('--panels', default='')
     ap.add_argument('--out', required=True)
-    ap.add_argument('--creases', default='')
     ap.add_argument('--crease-margin-mm', type=float, default=10.0)
     ap.add_argument('--max-p99-deg', type=float, default=2.5)
     ap.add_argument('--max-deg', type=float, default=5.0)
@@ -120,18 +116,10 @@ def main(argv):
     a = ap.parse(argv)
     if a.crease_margin_mm < 0:
         raise BadInput('--crease-margin-mm must be >= 0')
-    panels = []
-    for pat in B.globs(a.panels):
-        obs = [o for o in B.find_objects(pat) if o.type in B.GEOMETRY]
-        if not obs:
-            raise BadInput('no panel matches %r' % pat)
-        panels += [o for o in obs if o not in panels]
-    if not a.panels:
-        panels = B.registered('rg_panel')
-        if not panels:
-            raise BadInput('no panels: the scene has no object registered with ctx.add(..., panel=True)')
-    asked = B.globs(a.creases)
-    names = ['rg_crease'] + [n for n in asked if n != 'rg_crease']
+    panels = B.registered('rg_panel')
+    if not panels:
+        raise BadInput('no panels: the scene has no object registered with ctx.add(..., panel=True)')
+    names = ['rg_crease']
     unit = B.mm_per_unit()
     margin = a.crease_margin_mm / unit
     rows, ok, found_any = {}, True, set()
@@ -154,11 +142,8 @@ def main(argv):
         print('PANEL %-24s edges %6d  p99 %6s  max %6s  %s' % (
             ob.name, r['edges'], '-' if r['p99_deg'] is None else '%.2f' % r['p99_deg'],
             '-' if r['max_deg'] is None else '%.2f' % r['max_deg'], 'pass' if r['passed'] else 'FAIL'))
-    missing = [n for n in asked if n not in found_any]
-    if missing:
-        raise BadInput('crease %s found on no panel' % ', '.join(repr(m) for m in missing))
     res = dict(max_p99_deg=a.max_p99_deg, max_deg=a.max_deg, crease_margin_mm=a.crease_margin_mm, creases=names,
-               registered_panels=not a.panels,
+
                mesh='base' if a.base_mesh else 'evaluated', panels=rows, passed=bool(ok))
     save_json(os.path.join(a.out, 'fairness.json'), res)
     return EXIT_OK if ok else EXIT_GATE

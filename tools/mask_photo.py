@@ -23,6 +23,7 @@ import numpy as np
 from scipy import ndimage
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _formats as F  # noqa: E402
 from _common import (ArgParser, BadInput, EXIT_GATE, EXIT_OK, have_cv2, load_json, mask_boundary,  # noqa: E402
                      open_image, run, save_json, view_picture)
 
@@ -139,7 +140,7 @@ def main(argv):
     ap.add_argument('--max-background-spread', type=float, default=18.0)
     a = ap.parse(argv)
     project = os.path.abspath(a.project)
-    lm = load_json(a.landmarks or os.path.join(project, 'data', 'landmarks.json'), 'landmarks.json')
+    lm = F.landmarks(load_json(a.landmarks or os.path.join(project, 'data', 'landmarks.json'), 'landmarks.json'))
     if not isinstance(lm, list):
         raise BadInput('landmarks.json must be a list of views')
     entry = next((e for e in lm if isinstance(e, dict) and e.get('view') == a.view), None)
@@ -150,7 +151,7 @@ def main(argv):
         raise BadInput('picture is too small: %dx%d' % im.size)
     rgb = np.asarray(im.convert('RGB'), float)
     h, w = rgb.shape[:2]
-    kind = entry.get('kind', 'photo')
+    kind = entry['kind']
     checks = {}
     if a.seed:
         from PIL import Image

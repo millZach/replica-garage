@@ -1,10 +1,10 @@
 """Put each view's picture beside its render at the same scale and measure how far apart the silhouettes are.
 
 usage: python tools/compare.py --renders DIR --out DIR [--project DIR] [--cameras data/cameras.json]
-                               [--masks refs/masks] [--views a,b] [--max-median-px N] [--max-p95-px N]
+                               [--landmarks data/landmarks.json] [--masks refs/masks] [--views a,b] [--max-median-px N] [--max-p95-px N]
                                [--ref-width N] [--panel-width 640] [--no-crop]
 
-For each view in cameras.json: the picture is its file cut to its crop, the mask is <masks>/<view>.png (white =
+For each view in cameras.json: the picture is its file cut to its crop (both from landmarks.json), the mask is <masks>/<view>.png (white =
 vehicle, from mask_photo.py) and the render is <renders>/<view>.png (from render_views.py; any size of the same
 shape; its alpha channel is the render's silhouette). Writes <out>/boards/<view>.jpg (picture, render, and both
 outlines over the picture, one shared crop so the scale is the same) and <out>/outline.json: per view the median
@@ -21,7 +21,8 @@ import numpy as np
 from scipy import ndimage
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _common import (ArgParser, BadInput, EXIT_GATE, EXIT_OK, font, load_json, mask_boundary, open_image,  # noqa: E402
+import _formats as F  # noqa: E402
+from _common import (ArgParser, BadInput, EXIT_GATE, EXIT_OK, font, load_json, mask_boundary, open_image, view_sources,  # noqa: E402
                      project_limits, run, save_json, view_picture)
 
 USAGE = ('python tools/compare.py --renders DIR --out DIR [--project DIR] [--cameras data/cameras.json] '
@@ -99,6 +100,7 @@ def main(argv):
     ap.add_argument('--project', default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     ap.add_argument('--cameras')
     ap.add_argument('--masks')
+    ap.add_argument('--landmarks')
     ap.add_argument('--views')
     ap.add_argument('--max-median-px', type=float)
     ap.add_argument('--max-p95-px', type=float)
@@ -111,9 +113,8 @@ def main(argv):
     med_lim = a.max_median_px if a.max_median_px is not None else lim['outline_median_px']
     p95_lim = a.max_p95_px if a.max_p95_px is not None else lim['outline_p95_px']
     ref = a.ref_width if a.ref_width is not None else lim['outline_ref_width_px']
-    cams = load_json(a.cameras or os.path.join(project, 'data', 'cameras.json'), 'cameras file').get('cameras')
-    if not isinstance(cams, dict) or not cams:
-        raise BadInput('cameras.json has no cameras')
+    cams = F.cameras(load_json(a.cameras or os.path.join(project, 'data', 'cameras.json'), 'cameras file'))
+    sources = view_sources(project, a.landmarks, required=True)
     masks = a.masks or os.path.join(project, 'refs', 'masks')
     if not os.path.isdir(a.renders):
         raise BadInput('renders folder not found: %s' % a.renders)
@@ -124,10 +125,10 @@ def main(argv):
         if v not in cams:
             raise BadInput('view %r is not in cameras.json' % v)
         c = cams[v]
-        counted = c.get('grade') == 'precise'
-        if not c.get('file'):
-            raise BadInput('camera %r has no file' % v)
-        pic, _ = view_picture(project, c['file'], c.get('crop'), 'picture of %r' % v)
+        counted = c['grade'] == 'precise'
+        if v not in sources:
+            raise BadInput('view %r is not in landmarks.json, so its picture is not known' % v)
+        pic, _ = view_picture(project, sources[v][0], sources[v][1], 'picture of %r' % v)
         if pic.size != (int(c['width']), int(c['height'])):
             raise BadInput('picture of %r is %dx%d but its camera is %dx%d' % (v, pic.width, pic.height,
                                                                                 c['width'], c['height']))

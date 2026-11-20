@@ -97,15 +97,22 @@ def grid_panel(name, fold_deg=0.0, n=40, size=1.0, radius=3.0, x_off=0.0):
     return ob, fold
 
 
-ctx = empty_scene()
-p, _ = grid_panel('panel_smooth')
-register(ctx, 'body', p, 'body', panel=True)
-p, fold = grid_panel('panel_creased', fold_deg=30.0, x_off=2.0)
-register(ctx, 'body', p, 'body', panel=True)
-ctx.crease(p, fold)
-p, _ = grid_panel('panel_unmarked', fold_deg=30.0, x_off=4.0)
-register(ctx, 'body', p, 'body', panel=True)
-save('fair')
+for name, unmarked in (('fair', False), ('fair_bad', True)):
+    ctx = empty_scene()
+    p, _ = grid_panel('panel_smooth')
+    register(ctx, 'body', p, 'body', panel=True)
+    p, fold = grid_panel('panel_creased', fold_deg=30.0, x_off=2.0)
+    register(ctx, 'body', p, 'body', panel=True)
+    ctx.crease(p, fold)
+    if unmarked:
+        p, _ = grid_panel('panel_unmarked', fold_deg=30.0, x_off=4.0)
+        register(ctx, 'body', p, 'body', panel=True)
+    save(name)
+
+# bare: geometry nobody registered through the kit
+empty_scene()
+bpy.context.scene.collection.objects.link(box('loose box', 0, 1, 0, 1, 0, 1))
+save('bare')
 
 # seat: a bumper with a square opening, a lamp seated 2 mm proud and one sitting 6 mm proud
 ctx = empty_scene()
@@ -121,7 +128,8 @@ save('seat')
 
 # sep: closed parts; the door touches the wing, the bonnet pushes 5 mm into it, one pivot sits far away
 ctx = empty_scene()
-register(ctx, 'body', box('wing', 0.0, 1.0, 0.0, 0.5, 0.0, 0.5), 'body', part='wing', panel=True)
+register(ctx, 'body', box('wing', 0.0, 1.0, 0.0, 0.5, 0.0, 0.5), 'body', part='wing', panel=True,
+         separable=True)
 register(ctx, 'body', box('door', 1.0, 2.0, 0.0, 0.5, 0.0, 0.5), 'body', part='door', panel=True, separable=True,
          pivot=[1000.0, 0.0, 250.0])
 register(ctx, 'body', box('bonnet', -0.995, 0.005, 0.05, 0.45, 0.05, 0.45), 'body', part='bonnet', panel=True,

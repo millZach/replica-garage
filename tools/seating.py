@@ -22,6 +22,7 @@ from mathutils.bvhtree import BVHTree
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _blender as B  # noqa: E402
+import _formats as F  # noqa: E402
 from _common import ArgParser, BadInput, EXIT_GATE, EXIT_OK, load_json, save_json  # noqa: E402
 
 USAGE = ('blender -b <scene.blend> --python tools/seating.py -- --out DIR [--project DIR] [--build FILE] '
@@ -154,14 +155,10 @@ def main(argv):
             raise BadInput('panel %r is not in the scene' % a.on)
         pairs = [(a.part, a.on)]
     else:
-        build = load_json(a.build or os.path.join(B.project_dir(a), 'data', 'build.json'), 'build list')
-        if not isinstance(build, list):
-            raise BadInput('the build list must be a JSON list')
+        build = F.build(load_json(a.build or os.path.join(B.project_dir(a), 'data', 'build.json'), 'build list'))
         pairs = []
         for e in build:
-            for st in ((e.get('seats') or []) if isinstance(e, dict) else []):
-                if not isinstance(st, dict) or 'part' not in st or 'on' not in st:
-                    raise BadInput('each seat needs "part" and "on"')
+            for st in e['seats']:
                 pairs.append((str(st['part']), str(st['on'])))
     u = B.mm_per_unit()
     rows = [seat(p, o, a, u) for p, o in pairs]
