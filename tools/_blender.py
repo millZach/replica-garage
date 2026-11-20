@@ -123,12 +123,17 @@ class MeshData:
             self.loop_edge, self.poly_loop_total, self.poly_loop_start = le, lt, ls
             self.edge_faces = np.bincount(le, minlength=ne) if ne else np.zeros(0, np.int64)
             self.attributes = {}
+            self.face_attributes = {}
             if layers:
                 for at in me.attributes:
                     if at.domain == 'EDGE' and at.data_type == 'BOOLEAN' and len(at.data) == ne:
                         v = np.zeros(ne, bool)
                         at.data.foreach_get('value', v)
                         self.attributes[at.name] = v
+                    elif at.domain == 'FACE' and at.data_type == 'BOOLEAN' and len(at.data) == np_:
+                        v = np.zeros(np_, bool)
+                        at.data.foreach_get('value', v)
+                        self.face_attributes[at.name] = v
                 self.vgroups = {}
                 names = {g.index: g.name for g in ob.vertex_groups}
                 if names and len(me.vertices) and hasattr(me.vertices[0], 'groups'):
@@ -139,6 +144,14 @@ class MeshData:
             self.materials = [s.material.name if s.material else '' for s in ev.material_slots]
         finally:
             ev.to_mesh_clear()
+
+    def inner(self):
+        """Boolean per polygon: marked with ctx.inner (returned edge or inner face, not outer skin)."""
+        return self.face_attributes.get('rg_inner', np.zeros(len(self.poly_loop_total), bool))
+
+    def outer_tris(self):
+        """The triangles of the outer skin: every triangle whose polygon is not marked inner."""
+        return self.tris[~self.inner()[self.tri_poly]] if len(self.tris) else self.tris
 
     def closed(self):
         return len(self.edge_faces) > 0 and bool(np.all(self.edge_faces == 2))

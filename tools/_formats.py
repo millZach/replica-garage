@@ -196,6 +196,15 @@ def parts(d, name='parts.json'):
             raise BadInput('%s: level must be 2 or 3' % where)
         if e['basis'] not in ('measured', 'reconstructed'):
             raise BadInput('%s: basis must be "measured" or "reconstructed"' % where)
+        if 'assembly' in e and not isinstance(e['assembly'], str):
+            raise BadInput('%s: assembly must be the name of an assembly' % where)
+    names = {e['part'] for e in d}
+    for e in d:
+        if e['fixed_to'] != 'shell' and e['fixed_to'] not in names:
+            raise BadInput('%s part %r: fixed_to %r must be another part in the list or "shell"'
+                           % (name, e['part'], e['fixed_to']))
+        if e['fixed_to'] == e['part']:
+            raise BadInput('%s part %r is fixed to itself' % (name, e['part']))
     return d
 
 

@@ -1,7 +1,7 @@
 """Solve a camera for every photo and drawing from points whose place on the vehicle is known.
 
 usage: python tools/solve_cameras.py [--project DIR] [--vehicle FILE] [--landmarks FILE] [--out FILE]
-                                     [--max-rms-mm N] [--min-precise 3] [--free-centre]
+                                     [--max-rms-mm N] [--min-precise N] [--free-centre]
                                      [--triangulate PIXELS_FILE]
 
 Files default to <project>/data/vehicle.json, landmarks.json and cameras.json; --project defaults to the folder
@@ -18,7 +18,8 @@ more points. Each view's error at its known points is given in px and in mm on t
 precise when its RMS is within the camera limit (--max-rms-mm, else camera_rms_mm in data/limits.json, else
 tools/default_limits.json), otherwise visual. A photo whose fully known points all lie in one plane (thinner than
 a tenth of their spread) is graded visual unless its focal length is given: its distance does not solve.
-Exit 0 when at least --min-precise views are precise, 1 when fewer, 2 on bad input.
+Exit 0 when at least --min-precise views are precise (default: min_precise_views from the limits, 3), 1 when
+fewer, 2 on bad input.
 
 --triangulate takes a pixels file (a list of {"name", "view", "u", "v"}, file pixels) and the solved cameras, and
 for each name seen in two or more views prints its position on the vehicle and how far off it lands in each
@@ -463,7 +464,7 @@ def main(argv):
     ap.add_argument('--landmarks')
     ap.add_argument('--out')
     ap.add_argument('--max-rms-mm', type=float)
-    ap.add_argument('--min-precise', type=int, default=3)
+    ap.add_argument('--min-precise', type=int)
     ap.add_argument('--free-centre', action='store_true')
     ap.add_argument('--triangulate')
     a = ap.parse(argv)
@@ -477,6 +478,8 @@ def main(argv):
     lm = F.landmarks(load_json(a.landmarks or os.path.join(project, 'data', 'landmarks.json'), 'landmarks.json'))
     full, part, guess, dims = named_points(vehicle)
     limit = camera_limit(project, a.max_rms_mm)
+    if a.min_precise is None:
+        a.min_precise = int(project_limits(project)[0]['min_precise_views'])
     views = read_views(lm, project, full, part, dims)
     solved, partial = solve(views, part, guess, a.free_centre)
     allX = np.array(list(full.values()) or [[0, 0, 0]], float)

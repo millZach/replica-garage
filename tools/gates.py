@@ -1,6 +1,6 @@
 """Judge one frozen round against the gate limits.
 
-usage: python tools/gates.py <evidence/round-NN> [--limits FILE] [--min-precise 3] [--skip gate,gate]
+usage: python tools/gates.py <evidence/round-NN> [--limits FILE] [--skip gate,gate]
 
 Reads the tools' results anywhere in the round folder: cameras.json (else <project>/data/cameras.json),
 dimensions.json, outline.json, fairness.json, seating*.json, rays*.json, separation.json. Limits: the defaults in
@@ -9,7 +9,7 @@ default is printed and recorded. Each value is judged here against those limits;
 used.
 
 Gates (limit names as in default_limits.json):
-  cameras      at least --min-precise (default 3) views whose RMS is within camera_rms_mm (and not flat)
+  cameras      at least min_precise_views views whose RMS is within camera_rms_mm (and not flat)
   dimensions   each maker's dimension within dimension_error_mm (estimated ones are left out)
   outline      each precise view: median within outline_median_px and 95th percentile within outline_p95_px,
                at outline_ref_width_px image width
@@ -52,7 +52,7 @@ def num(v):
     return None if v is None else float(v)
 
 
-def collect(rnd, project, L, min_precise):
+def collect(rnd, project, L):
     rows = []
 
     def add(gate, item, measured, limit, passed, source, counted=True, **extra):
@@ -74,7 +74,7 @@ def collect(rnd, project, L, min_precise):
             n += precise
             add('cameras', v, float(c['rms_mm']), L['camera_rms_mm'], precise, p, counted=False, unit='mm',
                 grade=grades[v])
-        add('cameras', 'precise views', n, min_precise, n >= min_precise, p, unit='views')
+        add('cameras', 'precise views', n, L['min_precise_views'], n >= L['min_precise_views'], p, unit='views')
 
     for p in find(rnd, lambda n: n == 'dimensions.json'):
         d = load_json(p)
@@ -143,6 +143,9 @@ def collect(rnd, project, L, min_precise):
         if not isinstance(d.get('parts'), list) or not isinstance(d.get('overlaps'), list):
             bad(p, 'needs "parts" and "overlaps" lists')
         for part in d['parts']:
+            if part.get('status') == 'not built':
+                add('separation', '%s not built' % part.get('part'), None, None, True, p, counted=False)
+                continue
             add('separation', '%s own object' % part.get('part'), bool(part.get('own_object')), True,
                 part.get('own_object'), p)
             add('separation', '%s pivot' % part.get('part'), bool(part.get('pivot_ok')), True, part.get('pivot_ok'),
@@ -158,7 +161,6 @@ def main(argv):
     ap.add_argument('round')
     ap.add_argument('--limits')
     ap.add_argument('--skip', default='')
-    ap.add_argument('--min-precise', type=int, default=3)
     a = ap.parse(argv)
     rnd = os.path.abspath(a.round)
     if not os.path.isdir(rnd):
@@ -178,7 +180,7 @@ def main(argv):
         print('changed limit: %s %g -> %g' % (k, c['default'], c['used']))
     for s in skip:
         print('skipped gate:', s)
-    rows = [r for r in collect(rnd, project, L, a.min_precise) if r['gate'] not in skip]
+    rows = [r for r in collect(rnd, project, L) if r['gate'] not in skip]
     for r in rows:
         if isinstance(r['measured'], float) and not math.isfinite(r['measured']):
             r['measured'] = None

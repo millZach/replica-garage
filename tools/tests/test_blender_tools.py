@@ -37,10 +37,12 @@ def build(ctx):
 LAMP = '''import bpy
 
 def build(ctx):
-    hit = ctx.body.hit((ctx.mm(-2000), 0.0, ctx.mm(700)), (1.0, 0.0, 0.0))
-    assert hit is not None and abs(hit[0].x - ctx.mm(-900)) < 1e-6, hit
+    hit = ctx.body.hit((-2000.0, 0.0, 700.0), (1.0, 0.0, 0.0))          # millimetres in and out
+    assert hit is not None and abs(hit[0].x + 900.0) < 1e-3, hit
+    near = ctx.body.nearest((-1000.0, 10.0, 700.0))
+    assert abs(near[0].x + 900.0) < 1e-3 and abs(near[0].y - 10.0) < 1e-3, near
     me = bpy.data.meshes.new('lamp')
-    x = hit[0].x - ctx.mm(2)
+    x = ctx.mm(hit[0].x - 2.0)
     me.from_pydata([(x, -0.1, 0.6), (x, 0.1, 0.6), (x, 0.1, 0.8), (x, -0.1, 0.8)], [], [(0, 1, 2, 3)])
     ob = bpy.data.objects.new('lamp', me)
     me.materials.append(ctx.material('lens'))
@@ -72,7 +74,7 @@ def assembly_project(project):
                                                   'seats': [{'part': 'lamp', 'on': 'body shell'}]}])
     write_json(project / 'data' / 'finishes.json', {'proof_look': 'white', 'looks': {'white': {
         'studio': 'soft', 'slots': {'body': {'base_color': [0.8, 0.8, 0.8]}, 'lens': {'transmission': 1}}}}})
-    write_json(project / 'data' / 'parts.json', [{'part': 'lamp', 'fixed_to': 'body shell',
+    write_json(project / 'data' / 'parts.json', [{'part': 'lamp', 'fixed_to': 'shell',
                                                   'pivot': [-902.0, 0.0, 700.0], 'level': 2, 'basis': 'measured'}])
 
 
@@ -180,6 +182,14 @@ def test_closeups_gate_fails_when_a_side_is_left_out(blender, scenes, project, t
     assert res['coverage']['right']['fraction'] == 0.0 and res['coverage']['left']['passed'] is True
 
 
+def test_closeups_hide_several_parts(blender, scenes, project, tmp_path):
+    r = tool(blender, scenes['car'], 'closeups.py', project, '--out', tmp_path, *CLOSE, '--no-render',
+             '--hide', 'wheel_fl,wheel_fr,wheel_r*')
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    res = read_json(tmp_path / 'closeups.json')
+    assert sorted(res['hidden']) == ['wheel_fl', 'wheel_fr', 'wheel_rl', 'wheel_rr']
+
+
 def test_closeups_hide_and_bad_input(blender, scenes, project, tmp_path):
     ok(tool(blender, scenes['plain'], 'closeups.py', project, '--out', tmp_path, '--regions', 'left,underneath'), 2)
     # hiding the only part leaves nothing to look at
@@ -204,6 +214,19 @@ def test_fairness_gate_fails_on_unmarked_fold(blender, scenes, project, tmp_path
     assert p['panel_creased']['passed'] is True
 
 
+def test_fairness_and_double_skin_see_only_the_outer_skin(blender, scenes, project, tmp_path):
+    ok(tool(blender, scenes['hem'], 'fairness.py', project, '--out', tmp_path))
+    p = read_json(tmp_path / 'fairness.json')['panels']['bonnet']
+    assert p['max_deg'] < 1.0
+    ok(tool(blender, scenes['hem_bad'], 'fairness.py', project, '--out', tmp_path), 1)
+    assert read_json(tmp_path / 'fairness.json')['panels']['bonnet']['max_deg'] == pytest.approx(90.0, abs=1.0)
+    top_camera(project, z=3500.0)
+    ok(tool(blender, scenes['hem'], 'rays.py', project, '--grid', 12, '--out', tmp_path))
+    assert read_json(tmp_path / 'rays.json')['double_skins'] == 0
+    ok(tool(blender, scenes['hem_bad'], 'rays.py', project, '--grid', 12, '--out', tmp_path), 1)
+    assert read_json(tmp_path / 'rays.json')['places'][0]['gap_mm'] == pytest.approx(2.0, abs=0.1)
+
+
 def test_fairness_bad_input(blender, scenes, project, tmp_path):
     r = tool(blender, scenes['bare'], 'fairness.py', project, '--out', tmp_path)     # nothing registered
     ok(r, 2)
@@ -212,10 +235,10 @@ def test_fairness_bad_input(blender, scenes, project, tmp_path):
 
 # ------------------------------------------------------------------ rays
 
-def top_camera(project):
+def top_camera(project, z=3000.0):
     R = np.array([[1.0, 0, 0], [0, -1.0, 0], [0, 0, -1.0]])
     from conftest import Camera
-    c = camera_entry(Camera([0.0, 0.0, 3000.0], R, 200.0, 99.5, 49.5, 200, 100))
+    c = camera_entry(Camera([0.0, 0.0, z], R, 200.0, 99.5, 49.5, 200, 100))
     write_json(project / 'data' / 'cameras.json', {'cameras': {'top': c}})
     write_json(project / 'data' / 'landmarks.json', [landmark_entry('top', 'refs/photos/top.png',
                                                                    crop=[10, 20, 210, 120])])
@@ -294,7 +317,7 @@ def test_seating_bad_input(blender, scenes, project, tmp_path):
 # ------------------------------------------------------------------ separation
 
 PARTS = [{'part': 'door', 'fixed_to': 'wing', 'pivot': [1000.0, 0.0, 250.0], 'level': 2, 'basis': 'measured'},
-         {'part': 'wing', 'fixed_to': 'body', 'pivot': [0.0, 0.0, 0.0], 'level': 2, 'basis': 'measured'},
+         {'part': 'wing', 'fixed_to': 'shell', 'pivot': [0.0, 0.0, 0.0], 'level': 2, 'basis': 'measured'},
          {'part': 'bonnet', 'fixed_to': 'wing', 'pivot': [-500.0, 250.0, 250.0], 'level': 3,
           'basis': 'reconstructed'},
          {'part': 'boot lid', 'fixed_to': 'wing', 'pivot': [3000.0, 250.0, 500.0], 'level': 3,
@@ -322,6 +345,24 @@ def test_separation_gate_fails(blender, scenes, project, tmp_path):
     parts = {p['part']: p for p in r['parts']}
     assert parts['boot lid']['pivot_ok'] is False and parts['gone']['own_object'] is False
     assert parts['door']['pivot_ok'] is True
+
+
+def test_separation_not_built_does_not_fail(blender, scenes, project, tmp_path):
+    parts = [PARTS[0], PARTS[1],
+             {'part': 'engine', 'fixed_to': 'shell', 'pivot': [500.0, 0.0, 400.0], 'level': 3,
+              'basis': 'reconstructed', 'assembly': 'engine'}]
+    write_json(project / 'data' / 'parts.json', parts)
+    ok(tool(blender, scenes['sep'], 'separation.py', project, '--level', 3, '--out', tmp_path, '--no-render'))
+    r = {p['part']: p for p in read_json(tmp_path / 'separation.json')['parts']}
+    assert r['engine']['status'] == 'not built' and r['door']['status'] == 'built'
+    # the same part from an assembly that was built is missing, and fails
+    parts[2]['assembly'] = 'body'
+    write_json(project / 'data' / 'parts.json', parts)
+    ok(tool(blender, scenes['sep'], 'separation.py', project, '--level', 3, '--out', tmp_path, '--no-render'), 1)
+    assert read_json(tmp_path / 'separation.json')['parts'][2]['status'] == 'missing'
+    # --level 2 checks only the parts marked level 2
+    ok(tool(blender, scenes['sep'], 'separation.py', project, '--level', 2, '--out', tmp_path, '--no-render'))
+    assert [p['part'] for p in read_json(tmp_path / 'separation.json')['parts']] == ['door', 'wing']
 
 
 def test_separation_bad_input(blender, scenes, project, tmp_path):

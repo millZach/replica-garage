@@ -68,8 +68,8 @@ LAMP = '''import bpy
 
 
 def build(ctx):
-    loc, nor, _ = ctx.body.hit(ctx.mm([-3000, 0, 700]), (1, 0, 0))     # the nose, straight ahead of the lamp
-    x = loc.x - ctx.mm(1)                                                 # seated 1 mm proud
+    loc, nor, _ = ctx.body.hit([-3000, 0, 700], (1, 0, 0))     # mm: the nose, straight ahead of the lamp
+    x = ctx.mm(loc.x - 1)                                         # seated 1 mm proud, in scene units
     me = bpy.data.meshes.new('lamp')
     me.from_pydata([(x, -0.2, 0.6), (x, 0.2, 0.6), (x, 0.2, 0.8), (x, -0.2, 0.8)], [], [(0, 3, 2, 1)])
     lamp = bpy.data.objects.new('lamp', me)

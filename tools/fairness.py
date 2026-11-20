@@ -4,7 +4,8 @@ usage: blender -b <scene.blend> --python tools/fairness.py -- --out DIR [--proje
        [--max-p99-deg 2.5] [--max-deg 5] [--base-mesh]
 
 The panels are the objects the kit registered as painted skin (ctx.add(..., panel=True)); the creases are the
-edges marked with ctx.crease (the rg_crease edge attribute). Every edge within --crease-margin-mm of a crease is
+edges marked with ctx.crease (the rg_crease edge attribute). Faces marked with ctx.inner (a removable panel's
+returned edge and inner face) are not skin: only edges between two outer faces are measured. Every edge within --crease-margin-mm of a crease is
 left out, so the fold and the faces rolling into it are not counted. For every edge shared by exactly two faces
 the angle between the two face normals is taken; per panel the 99th percentile and the maximum are reported, with
 where the maximum is (mm). The evaluated mesh (as it renders) is measured; --base-mesh measures the mesh as
@@ -93,7 +94,8 @@ def measure(md, creases, margin):
     inner = np.flatnonzero(md.edge_faces == 2)
     start = np.searchsorted(e_sorted, inner)
     pa, pb = p_sorted[start], p_sorted[start + 1]
-    ok = good_poly[pa] & good_poly[pb]
+    skin = ~md.inner()
+    ok = good_poly[pa] & good_poly[pb] & skin[pa] & skin[pb]       # outer skin only
     inner, pa, pb = inner[ok], pa[ok], pb[ok]
     cosang = np.clip((pn[pa] * pn[pb]).sum(1), -1.0, 1.0)
     ang = np.degrees(np.arccos(cosang))

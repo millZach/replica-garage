@@ -288,6 +288,7 @@ def mask_boundary(mask):
 
 DEFAULT_LIMITS = {
     'camera_rms_mm': 12.0,
+    'min_precise_views': 3,
     'dimension_error_mm': 10.0,
     'outline_median_px': 3.0,
     'outline_p95_px': 8.0,

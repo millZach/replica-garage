@@ -6,8 +6,9 @@ usage: blender -b <scene.blend> --python tools/closeups.py -- --out DIR [--proje
        [--no-render] [--device CPU|GPU] [--gpu-type T] [--samples N]
 
 This is the close-up ring. Mode defaults to lit, under the look (default the proof look in data/finishes.json)
-and its studio. Sampling and device come from data/render.json, as for render_views.py. --hide <part> leaves
-parts out (by registered part name or object name), to look at what a removed panel uncovers.
+and its studio. Sampling and device come from data/render.json, as for render_views.py. --hide a,b,c leaves
+those registered parts out (names or globs), to look at what removed panels uncover; nested parts need all of
+them. It runs on whatever scene it is given (out/vehicle.blend, a round's workshop.blend) and writes to --out.
 
 Each view frames a square of --size-mm on the surface, looking straight in along the region's axis. Views are laid
 on a grid over each face of the vehicle's bounding box with --overlap between neighbours; each is aimed at the

@@ -11,7 +11,8 @@ For each ray every surface it passes through is listed in order: object, materia
 faces the camera. With --grid the output is compact: per view, tables of object and material names and one row
 per ray [u, v, [[object index, material index, x, y, z, faces camera], ...]]. With --pixels each pixel gets a
 full listing, traced object by object so surfaces lying on top of each other are all found.
-Painted panels are the objects registered with ctx.add(..., panel=True). With --grid every place where one
+Painted panels are the objects registered with ctx.add(..., panel=True), less the faces marked with ctx.inner
+(returned edges, inner faces). With --grid every place where one
 camera-facing painted surface lies within --stack-mm behind another is a double skin; each panel is traced on
 its own, so coincident skins are found too. Without registered panels the double skin count is not given.
 Writes <out>/<name>.json (default rays.json; gates.py reads rays*.json). Exit 1 when a double skin is found,
@@ -87,10 +88,11 @@ class Panels:
     def __init__(self, objs):
         self.items = []
         for ob in objs:
-            md = B.MeshData(ob)
-            if len(md.tris):
+            md = B.MeshData(ob, layers=True)
+            tris = md.outer_tris()                  # returned edges and inner faces are not skin
+            if len(tris):
                 self.items.append((ob.name, BVHTree.FromPolygons([tuple(v) for v in md.verts],
-                                                                 [tuple(t) for t in md.tris])))
+                                                                 [tuple(t) for t in tris])))
 
     def stack(self, o, d, depth, step, far):
         """(position, the two panels, gap) where a second camera-facing panel surface lies within depth behind

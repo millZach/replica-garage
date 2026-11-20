@@ -5,13 +5,16 @@ usage: blender -b <scene.blend> --python tools/separation.py -- --level 2|3 --ou
        [--no-render] [--mode clay|lit|zebra] [--look NAME] [--device CPU|GPU] [--samples N]
 
 parts.json (default <project>/data/parts.json) is a list of {"part", "fixed_to", "pivot": [x, y, z] mm,
-"level": 2 | 3, "basis"}; --level 2 checks the level 2 parts, --level 3 all of them. For each part: it is its own
-object (exactly one geometry object registered under that part name, with separable=True), and its origin
-is within --pivot-tolerance-mm of the pivot in parts.json. For each pair of parts whose bounding boxes touch, the
+"level": 2 | 3, "basis", "assembly" (optional)}; --level 2 checks only the parts with "level": 2, --level 3 all of
+them. For each part: it is its own object (exactly one geometry object registered under that part name, with
+separable=True), and its origin is within --pivot-tolerance-mm of the pivot in parts.json. A part whose object is
+absent while its "assembly" is not among the assemblies this scene was built from is listed as "not built" and
+does not fail; an absent part with no "assembly", or whose assembly was built, is "missing" and fails. For each pair of parts whose bounding boxes touch, the
 overlap is the deepest one reaches into the other: vertices inside a closed (watertight) part, measured to its
 surface, and for crossing surfaces the depth of the crossing triangles behind each other (a finer mesh gives a
 closer value).
-The exploded view moves each part away from the part it is fixed to (or from the vehicle's centre) by
+The exploded view moves each part away from the part it is fixed to (or from the vehicle's centre when it is
+fixed to "shell") by
 --explode-mm and renders it from the front left, above, to <out>/exploded.png. Nothing is saved to the scene.
 Writes <out>/separation.json. Exit 1 when a part is missing or not its own object, a pivot is off, or two parts
 overlap by more than --tolerance-mm; 2 on bad input.
@@ -75,6 +78,18 @@ def overlap_depth(A, C, far):
     return depth
 
 
+def built_assemblies():
+    """Assemblies the scene was built from: assemble.py's record, and every assembly that registered an object."""
+    import json
+    sc = B.bpy.context.scene
+    out = {str(o.get('rg_assembly')) for o in sc.objects if o.get('rg_assembly')}
+    try:
+        out |= {s['assembly'] for s in json.loads(sc.get('rg_build', '[]'))}
+    except (TypeError, ValueError, KeyError):
+        pass
+    return out
+
+
 def read_parts(path, level):
     d = F.parts(load_json(path, 'parts.json'))
     if not d:
@@ -119,10 +134,17 @@ def main(argv):
     listed = read_parts(a.parts or os.path.join(project, 'data', 'parts.json'), a.level)
     u = B.mm_per_unit()
     rows, parts, ok = [], [], True
+    built = built_assemblies()
     for e in listed:
         obs = B.part_objects(str(e['part']))
         row = dict(part=e['part'], level=e['level'], fixed_to=e.get('fixed_to'), basis=e.get('basis'),
-                   objects=[o.name for o in obs])
+                   assembly=e.get('assembly'), objects=[o.name for o in obs])
+        if not obs and e.get('assembly') and e['assembly'] not in built:
+            row.update(status='not built', own_object=None, pivot_ok=None,
+                       note='its assembly %r is not in the build this scene came from' % e['assembly'])
+            rows.append(row)
+            continue
+        row['status'] = 'built' if obs else 'missing'
         if len(obs) != 1:
             row.update(own_object=False, pivot_ok=False,
                        note='no object' if not obs else '%d objects share this part name' % len(obs))
@@ -163,8 +185,8 @@ def main(argv):
         overlaps.append(dict(a=ea['part'], b=ec['part'], depth_mm=d, passed=passed))
         print('PAIR %-20s %-20s overlap %.2f mm  %s' % (ea['part'], ec['part'], d, 'pass' if passed else 'FAIL'))
     for r in rows:
-        print('PART %-24s own %s  pivot %s%s' % (r['part'], r['own_object'], r['pivot_ok'],
-                                                ('  (' + r['note'] + ')') if r.get('note') else ''))
+        print('PART %-24s %-9s own %s  pivot %s%s' % (r['part'], r['status'], r['own_object'], r['pivot_ok'],
+                                                      ('  (' + r['note'] + ')') if r.get('note') else ''))
     os.makedirs(a.out, exist_ok=True)
     exploded, look = None, None
     if not a.no_render and parts:
@@ -175,7 +197,7 @@ def main(argv):
         lo, hi = B.bbox(geo)
         centre = (lo + hi) / 2
         for e, p in parts:
-            base = B.part_objects(str(e.get('fixed_to'))) if e.get('fixed_to') else []
+            base = B.part_objects(str(e['fixed_to'])) if e['fixed_to'] != 'shell' else []
             ref = np.mean(B.bbox(base), axis=0) if base else centre
             d = (p.lo + p.hi) / 2 - ref
             d = d / np.linalg.norm(d) if np.linalg.norm(d) > 1e-9 else np.array([0, 0, 1.0])

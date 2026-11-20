@@ -11,7 +11,8 @@ assembly in depends_on must come earlier in the list.
 --working <assembly> takes that module from src/<assembly>.py instead of its accepted version (or adds it after
 the listed ones if it is not in the list yet) and saves to out/work-<assembly>.blend.
 Each module's build(ctx) runs with the kit's Context (tools/kit.py): vehicle.json, the look (--look, default the
-proof look in data/finishes.json) and data/parts.json. The scene is saved to --out (default out/vehicle.blend),
+proof look in data/finishes.json) and data/parts.json. The scene is saved to --out (default out/vehicle.blend;
+out/workshop.blend when --build is data/build-workshop.json),
 with <out>.json beside it: each module, its hash, the objects it registered and any warnings.
 Exit 1 on a hash mismatch, an order rule broken or any module error (nothing is saved); 2 on bad input.
 """
@@ -118,8 +119,13 @@ def main(argv):
         F.finishes(finishes)
     parts = kit.read_json(os.path.join(project, 'data', 'parts.json'), [])
     F.parts(parts)
-    out = os.path.abspath(a.out or os.path.join(project, 'out', ('work-%s.blend' % a.working) if a.working
-                                                else 'vehicle.blend'))
+    if a.working:
+        default = 'work-%s.blend' % a.working
+    elif a.build and os.path.basename(a.build) == 'build-workshop.json':
+        default = 'workshop.blend'
+    else:
+        default = 'vehicle.blend'
+    out = os.path.abspath(a.out or os.path.join(project, 'out', default))
     steps, problems = plan(project, build, a.working)
     log = dict(project=project, out=out, look=None, steps=[], problems=problems, warnings=[])
     if problems:

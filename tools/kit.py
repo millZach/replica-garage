@@ -13,12 +13,13 @@ module only makes objects: it never opens, saves or clears a scene.
         ctx.crease(shell, character_line_edges)         # real creases, left out of the fairness gate
 
     def build(ctx):                                     # src/front.py, manifest depends_on ["body"]
-        hit = ctx.body.hit(ctx.mm([-2000, -600, 650]), (1, 0, 0))   # where the skin is, ahead of the lamp
-        lamp = make_lamp(hit[0], hit[1])
+        loc, normal, _ = ctx.body.hit([-2000, -600, 650], (1, 0, 0))  # mm: where the skin is, ahead of the lamp
+        lamp = make_lamp(ctx.mm(loc), normal)           # your bpy code works in scene units
         lamp.data.materials.append(ctx.material('glass'))
         ctx.add(lamp, part='headlamp_l')                # build.json seats it: {"part": "headlamp_l", "on": ...}
 
-Units: every file is in millimetres; scenes are in metres; ctx.mm(value) converts. Vehicle axes: origin on the
+Units: every file and every position the kit takes or gives is in millimetres; scenes are in metres;
+ctx.mm(value) converts millimetres to scene units for your own bpy code. Vehicle axes: origin on the
 ground under the middle of the front axle, X toward the rear, Y toward the vehicle's right, Z up.
 
 What the kit records, so the tools find panels, creases and parts in the saved scene without name lists
@@ -26,7 +27,7 @@ What the kit records, so the tools find panels, creases and parts in the saved s
   rg_assembly  the assembly that added it        rg_part      its part name (default: the object's name)
   rg_panel     painted skin                       rg_separable a part that comes off (take-apart levels 2, 3)
   rg_steer     "left" or "right" for a steerable front wheel (it turns about its own origin's vertical axis)
-and the boolean edge attribute rg_crease on each mesh with creases.
+the boolean edge attribute rg_crease (ctx.crease) and the boolean face attribute rg_inner (ctx.inner).
 
 The render tools also use apply_look() and build_studio() here: a look sets every slot material from
 data/finishes.json; a studio preset (soft, gloss, dark-paint) lights the vehicle for lit renders.
@@ -42,6 +43,7 @@ from mathutils.bvhtree import BVHTree
 
 PROPS = ('rg_assembly', 'rg_part', 'rg_panel', 'rg_separable', 'rg_steer')
 CREASE = 'rg_crease'
+INNER = 'rg_inner'
 PRINCIPLED = {'base_color': 'Base Color', 'metallic': 'Metallic', 'roughness': 'Roughness', 'coat': 'Coat Weight',
               'coat_roughness': 'Coat Roughness', 'transmission': 'Transmission Weight', 'ior': 'IOR',
               'emission': 'Emission Color', 'emission_strength': 'Emission Strength'}
@@ -246,14 +248,14 @@ def steer(angle_deg):
 class BodySurface:
     """ctx.body: where the painted skin built so far is, for parts that must sit on it or follow it.
 
-    The surface is every object registered with ctx.add(..., panel=True) by the assemblies built before the
-    current one (and by the current one, up to the call). It is gathered again whenever a panel is added, so a
-    query always sees the panels as they stand. All positions and directions are in scene units (metres), world
-    space; use ctx.mm() to turn millimetres into scene units.
+    The surface is the outer skin of every object registered with ctx.add(..., panel=True) so far, by the
+    assemblies built before the current one and by the current one up to the call. Faces marked with ctx.inner
+    (returned edges, inner faces) are not part of it. It is gathered again whenever a panel is added.
 
-    Both queries return (location, normal, object name), with location and normal as mathutils Vectors and the
-    normal pointing out of the painted side, or None when nothing is found within `distance`. Asking before any
-    panel exists raises RuntimeError: build the body first and list it in your manifest's depends_on.
+    Positions are in millimetres, vehicle coordinates, like every position the kit takes or gives. Both queries
+    return (location, normal, object name): location a mathutils Vector in mm, normal a unit Vector pointing out
+    of the painted side; or None when nothing is found within `distance` mm. Asking before any panel exists raises
+    RuntimeError: build the body first and list it in your manifest's depends_on.
     """
 
     def __init__(self):
@@ -269,13 +271,19 @@ class BodySurface:
             if not ob.get('rg_panel') or ob.type not in ('MESH', 'CURVE', 'SURFACE', 'FONT', 'META'):
                 continue
             ev = ob.evaluated_get(dg)
-            me = ev.to_mesh()
+            me = ev.to_mesh(preserve_all_data_layers=True, depsgraph=dg)
             try:
                 me.calc_loop_triangles()
+                at = me.attributes.get(INNER)
+                inner = [False] * len(me.polygons)
+                if at is not None and at.domain == 'FACE' and at.data_type == 'BOOLEAN':
+                    inner = [d.value for d in at.data]
                 M = ob.matrix_world
                 base = len(verts)
                 verts += [tuple(M @ v.co) for v in me.vertices]
                 for t in me.loop_triangles:
+                    if inner[t.polygon_index]:
+                        continue
                     tris.append(tuple(base + i for i in t.vertices))
                     owner.append(ob.name)
             finally:
@@ -290,22 +298,24 @@ class BodySurface:
         """Drop the gathered surface so the next query gathers it again (done whenever a panel is added)."""
         self._bvh = None
 
-    def hit(self, origin, direction, distance=1e6):
-        """The first point where the ray from `origin` along `direction` meets the painted skin.
+    def hit(self, origin, direction, distance=1e7):
+        """The first point where the ray from `origin` (mm) along `direction` meets the outer skin.
 
-        origin, direction: 3-sequences in scene units (direction need not be unit length).
-        Returns (location, normal, object name), or None if the ray meets nothing within `distance`.
+        direction need not be unit length. Returns (location in mm, normal, object name), or None if the ray
+        meets nothing within `distance` mm.
         """
-        loc, nor, idx, _ = self._tree().ray_cast(Vector(origin), Vector(direction).normalized(), distance)
-        return None if loc is None else (loc, nor, self._names[idx])
+        k = mm_per_unit()
+        loc, nor, idx, _ = self._tree().ray_cast(Vector(origin) / k, Vector(direction).normalized(), distance / k)
+        return None if loc is None else (loc * k, nor, self._names[idx])
 
-    def nearest(self, point, distance=1e6):
-        """The point of the painted skin nearest to `point` (scene units).
+    def nearest(self, point, distance=1e7):
+        """The point of the outer skin nearest to `point` (mm).
 
-        Returns (location, normal, object name), or None if nothing lies within `distance`.
+        Returns (location in mm, normal, object name), or None if nothing lies within `distance` mm.
         """
-        loc, nor, idx, _ = self._tree().find_nearest(Vector(point), distance)
-        return None if loc is None else (loc, nor, self._names[idx])
+        k = mm_per_unit()
+        loc, nor, idx, _ = self._tree().find_nearest(Vector(point) / k, distance / k)
+        return None if loc is None else (loc * k, nor, self._names[idx])
 
 
 # ------------------------------------------------------------------ the context
@@ -320,8 +330,12 @@ class Context:
       ctx.assembly    the assembly whose build(ctx) is running.
       ctx.body        the painted skin built so far: ctx.body.hit(...) and ctx.body.nearest(...) (BodySurface).
 
-    Methods: ctx.mm, ctx.add, ctx.crease, ctx.material, ctx.steerable, ctx.part. Everything a module makes must
-    pass through ctx.add, or the tools will not see it as part of the vehicle's registered parts.
+    Methods: ctx.mm, ctx.add, ctx.crease, ctx.inner, ctx.material, ctx.steerable, ctx.part. Everything a module
+    makes must pass through ctx.add, or the tools will not see it as part of the vehicle's registered parts.
+
+    Units: every position the kit takes or gives is in millimetres, vehicle coordinates (ctx.add pivot,
+    ctx.part()["pivot"], ctx.body.hit and ctx.body.nearest). The objects you build live in the scene in metres;
+    ctx.mm(value) turns millimetres into scene units for your own bpy code.
     """
 
     def __init__(self, vehicle=None, finishes=None, look=None, parts=None):
@@ -419,6 +433,23 @@ class Context:
             if i is None:
                 raise ValueError('no edge between vertices %r on %s' % (tuple(e), obj.name))
             at.data[i].value = True
+
+    def inner(self, obj, faces):
+        """Mark faces of a registered panel that are not its outer skin: a removable panel's returned edge (the
+        hem folded under its border) and its inner face. The fairness and double-skin gates and ctx.body then
+        see only the outer skin, while the part stays one object.
+
+        faces: polygon indices of obj's mesh. Recorded as the boolean face attribute rg_inner. Model the body's
+        own door shuts (jambs) as their own objects registered without panel=True, or mark them here.
+        """
+        me = obj.data
+        at = me.attributes.get(INNER)
+        if at is None or at.domain != 'FACE' or at.data_type != 'BOOLEAN':
+            at = me.attributes.new(INNER, 'BOOLEAN', 'FACE')
+        for f in faces:
+            at.data[int(f)].value = True
+        if obj.get('rg_panel'):
+            self.body.reset()
 
     def material(self, slot):
         """The material for a slot (body, wheel, caliper, glass, trim, seat, ...) in the current look.

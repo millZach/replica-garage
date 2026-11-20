@@ -147,4 +147,42 @@ register(ctx, 'body', mesh_object('skin_inner', [(0.2, -1, -0.003), (1, -1, -0.0
 register(ctx, 'stand', mesh_object('floor', [(-3, -3, -1), (3, -3, -1), (3, 3, -1), (-3, 3, -1)], [(0, 1, 2, 3)]),
          'floor')
 save('rays')
+
+
+# hem: a removable bonnet as one object: a flat outer skin, a returned edge folded 20 mm down round its border
+# and an inner face 2 mm under the skin, facing it. hem marks the return and the inner face with ctx.inner;
+# hem_bad leaves them unmarked.
+def bonnet(n=10, size=1.0, z=0.5):
+    verts, faces = [], []
+    for i in range(n + 1):
+        for j in range(n + 1):
+            verts.append((size * i / n - size / 2, size * j / n - size / 2, z))
+    for i in range(n):
+        for j in range(n):
+            a = i * (n + 1) + j
+            faces.append((a, a + n + 1, a + n + 2, a + 1))
+    outer = len(faces)
+    ring = [i * (n + 1) for i in range(n + 1)] + [n * (n + 1) + j for j in range(1, n + 1)] +         [i * (n + 1) + n for i in range(n - 1, -1, -1)] + [j for j in range(n - 1, 0, -1)]
+    low = []
+    for k in ring:
+        x, y, _ = verts[k]
+        low.append(len(verts))
+        verts.append((x, y, z - 0.02))
+    for k in range(len(ring)):
+        a, b = ring[k], ring[(k + 1) % len(ring)]
+        faces.append((b, a, low[k], low[(k + 1) % len(ring)]))
+    s = 0.45
+    base = len(verts)
+    verts += [(-s, -s, z - 0.002), (s, -s, z - 0.002), (s, s, z - 0.002), (-s, s, z - 0.002)]
+    faces.append((base, base + 1, base + 2, base + 3))
+    return mesh_object('bonnet', verts, faces), list(range(outer, len(faces)))
+
+
+for name, mark in (('hem', True), ('hem_bad', False)):
+    ctx = empty_scene()
+    ob, not_skin = bonnet()
+    register(ctx, 'body', ob, 'body', part='bonnet', panel=True, separable=True)
+    if mark:
+        ctx.inner(ob, not_skin)
+    save(name)
 print('SCENES DONE')
