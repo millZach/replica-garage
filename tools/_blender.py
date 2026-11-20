@@ -164,105 +164,115 @@ def bbox(objs, dg=None):
 
 # ------------------------------------------------------------------ rendering
 
-def add_render_args(ap, mode_default='clay'):
+def project_dir(a):
+    """--project, or the folder above this tools/ folder."""
+    if getattr(a, 'project', None):
+        return os.path.abspath(a.project)
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def add_project_arg(ap):
+    ap.add_argument('--project', default=None, help='the project folder (default: the folder above tools/)')
+
+
+def add_render_args(ap):
     ap.add_argument('--mode', choices=('lit', 'clay', 'zebra'), default=None,
-                    help='lit: the scene with the finish; clay: grey; zebra: %d stripes' % ZEBRA_STRIPES)
-    ap.add_argument('--finish', default=None, help='a finish name from --finishes, or "scene" (default)')
-    ap.add_argument('--finishes', help='finishes JSON file (default <project>/data/finishes.json)')
-    ap.add_argument('--engine', default=None, help='CYCLES (default), EEVEE or WORKBENCH')
+                    help='lit: the look under its studio; clay: grey; zebra: %d stripes' % ZEBRA_STRIPES)
+    ap.add_argument('--look', default=None, help='a look in data/finishes.json (default: the proof look)')
     ap.add_argument('--device', default=None, help='CPU (default) or GPU')
     ap.add_argument('--gpu-type', default=None, help='OPTIX, CUDA, HIP, METAL or ONEAPI (default: first that works)')
     ap.add_argument('--samples', type=int, default=None)
-    ap.add_argument('--hide', default='', help='comma separated name globs of objects to leave out of renders')
-    ap.set_defaults(_mode_default=mode_default)
+    ap.add_argument('--hide', default='', help='parts or objects, by name or glob, left out of the pictures')
 
 
-RENDER_DEFAULTS = dict(mode='clay', finish='scene', engine='CYCLES', device='CPU', gpu_type=None, samples=64)
+RENDER_DEFAULTS = dict(samples=128, device='CPU', gpu_type=None, adaptive_threshold=0.02, denoise=True)
+TRIAL_SAMPLES = 16
 
 
-def render_settings(a, prior=None):
-    """Merge explicit arguments over a prior render.json's settings over the defaults."""
+def render_settings(a, settings_path, trial=False):
+    """Sampling and device for a render. Evidence renders read them from settings_path (data/render.json) when it
+    exists, so every round matches; otherwise they come from the arguments and are written there after the first
+    render. Trial renders neither read nor write it. Returns (settings, ignored arguments, path to write or None)."""
     s = dict(RENDER_DEFAULTS)
-    s['mode'] = getattr(a, '_mode_default', s['mode'])
-    if prior:
+    if trial:
+        s['samples'] = TRIAL_SAMPLES
+    stored = None
+    if not trial and settings_path and os.path.isfile(settings_path):
+        stored = load_json(settings_path, 'render settings')
+        if not isinstance(stored, dict):
+            raise BadInput('%s must hold a JSON object' % settings_path)
+    ignored = {}
+    if stored:
         for k in RENDER_DEFAULTS:
-            if k in prior:
-                s[k] = prior[k]
-    changed = {}
-    for k in RENDER_DEFAULTS:
-        v = getattr(a, k, None)
-        if v is not None:
-            if prior and k in prior and prior[k] != v:
-                changed[k] = dict(prior=prior[k], used=v)
-            s[k] = v
-    if s['mode'] not in ('lit', 'clay', 'zebra'):
-        raise BadInput('mode must be lit, clay or zebra')
+            if k in stored:
+                s[k] = stored[k]
+        for k in ('samples', 'device', 'gpu_type'):
+            v = getattr(a, k, None)
+            if v is not None and v != stored.get(k):
+                ignored[k] = v
+    else:
+        for k in ('samples', 'device', 'gpu_type'):
+            v = getattr(a, k, None)
+            if v is not None:
+                s[k] = v
     if int(s['samples']) < 1:
         raise BadInput('samples must be at least 1')
-    return s, changed
+    if str(s['device']).upper() not in ('CPU', 'GPU'):
+        raise BadInput('device must be CPU or GPU')
+    for k, v in ignored.items():
+        print('NOTE %s=%s ignored: %s holds the settings every round uses' % (k, v, settings_path))
+    return s, ignored, (None if trial or stored else settings_path)
 
 
-def engine_id(name):
-    items = bpy.types.RenderSettings.bl_rna.properties['engine'].enum_items.keys()
-    name = (name or 'CYCLES').upper()
-    want = {'CYCLES': ['CYCLES'], 'EEVEE': ['BLENDER_EEVEE', 'BLENDER_EEVEE_NEXT'],
-            'WORKBENCH': ['BLENDER_WORKBENCH']}.get(name, [name])
-    for w in want:
-        if w in items or w == 'CYCLES':
-            return w
-    raise BadInput('render engine %r is not available (have: %s)' % (name, ', '.join(items)))
+def write_settings(path, s, info):
+    if path:
+        from _common import save_json
+        save_json(path, dict(s, engine='CYCLES', gpu_type=info.get('gpu_type', s.get('gpu_type')),
+                             written_by='first evidence render', blender=bpy.app.version_string))
 
 
 def setup_render(s):
+    """Cycles with the given sampling and device; transparent film so the alpha is the silhouette."""
     sc = bpy.context.scene
-    eng = engine_id(s['engine'])
-    sc.render.engine = eng
-    info = dict(engine=eng)
-    if eng == 'CYCLES':
-        cy = sc.cycles
-        dev = (s['device'] or 'CPU').upper()
-        if dev == 'GPU':
-            pr = bpy.context.preferences.addons['cycles'].preferences
-            types = [s['gpu_type'].upper()] if s['gpu_type'] else ['OPTIX', 'CUDA', 'HIP', 'METAL', 'ONEAPI']
-            used = None
-            for t in types:
-                try:
-                    pr.compute_device_type = t
-                    pr.get_devices()
-                except (TypeError, ValueError):
-                    continue
-                ok = False
-                for d in pr.devices:
-                    d.use = d.type == t
-                    ok = ok or d.use
-                if ok:
-                    used = t
-                    break
-            if not used:
-                raise BadInput('no GPU device found for %s' % ', '.join(types))
-            cy.device = 'GPU'
-            info.update(device='GPU', gpu_type=used)
-        elif dev == 'CPU':
-            cy.device = 'CPU'
-            info.update(device='CPU')
-        else:
-            raise BadInput('device must be CPU or GPU')
-        cy.samples = int(s['samples'])
-        cy.use_adaptive_sampling = True
-        cy.adaptive_threshold = 0.02
-        cy.seed = 0
+    sc.render.engine = 'CYCLES'
+    cy = sc.cycles
+    info = dict(engine='CYCLES')
+    dev = str(s['device'] or 'CPU').upper()
+    if dev == 'GPU':
+        pr = bpy.context.preferences.addons['cycles'].preferences
+        types = [s['gpu_type'].upper()] if s.get('gpu_type') else ['OPTIX', 'CUDA', 'HIP', 'METAL', 'ONEAPI']
+        used = None
+        for t in types:
+            try:
+                pr.compute_device_type = t
+                pr.get_devices()
+            except (TypeError, ValueError):
+                continue
+            found = False
+            for d in pr.devices:
+                d.use = d.type == t
+                found = found or d.use
+            if found:
+                used = t
+                break
+        if not used:
+            raise BadInput('no GPU device found for %s' % ', '.join(types))
+        cy.device = 'GPU'
+        info.update(device='GPU', gpu_type=used)
+    else:
+        cy.device = 'CPU'
+        info.update(device='CPU', gpu_type=None)
+    cy.samples = int(s['samples'])
+    cy.use_adaptive_sampling = True
+    cy.adaptive_threshold = float(s.get('adaptive_threshold', 0.02))
+    cy.seed = 0
+    cy.use_denoising = bool(s.get('denoise', True))
+    if cy.use_denoising:
         try:
-            cy.use_denoising = True
             cy.denoiser = 'OPENIMAGEDENOISE'
-        except (TypeError, AttributeError):
+        except TypeError:
             cy.use_denoising = False
-        info['samples'] = int(s['samples'])
-    elif eng.startswith('BLENDER_EEVEE'):
-        try:
-            sc.eevee.taa_render_samples = int(s['samples'])
-        except AttributeError:
-            pass
-        info['samples'] = int(s['samples'])
+    info.update(samples=int(s['samples']), denoise=cy.use_denoising)
     sc.render.use_motion_blur = False
     sc.render.film_transparent = True
     sc.render.resolution_percentage = 100
@@ -274,47 +284,12 @@ def setup_render(s):
     return info
 
 
-def load_finishes(path):
-    if not path or not os.path.isfile(path):
-        return {}
-    d = load_json(path, 'finishes file')
-    f = d.get('finishes', d) if isinstance(d, dict) else None
-    if not isinstance(f, dict):
-        raise BadInput('finishes file must hold {"finishes": {name: [...]}}')
+def load_finishes(project):
+    import kit
+    f = kit.read_json(os.path.join(project, 'data', 'finishes.json'))
+    if f is not None and not isinstance(f, dict):
+        raise BadInput('data/finishes.json must hold a JSON object')
     return f
-
-
-PRINCIPLED = {'base_color': 'Base Color', 'metallic': 'Metallic', 'roughness': 'Roughness',
-              'coat_weight': 'Coat Weight', 'coat_roughness': 'Coat Roughness',
-              'specular': 'Specular IOR Level'}
-
-
-def apply_finish(name, finishes):
-    """Set Principled BSDF values on the materials a finish names. Never saved back."""
-    if not name or name == 'scene':
-        return []
-    if name not in finishes:
-        raise BadInput('finish %r not found (have: %s)' % (name, ', '.join(sorted(finishes)) or 'none'))
-    rules = finishes[name]
-    rules = rules if isinstance(rules, list) else [rules]
-    touched = []
-    for r in rules:
-        pats = r.get('materials', '*')
-        pats = pats if isinstance(pats, list) else [pats]
-        for m in bpy.data.materials:
-            if not match(m.name, pats) or not m.node_tree:
-                continue
-            for n in m.node_tree.nodes:
-                if n.type != 'BSDF_PRINCIPLED':
-                    continue
-                for k, inp in PRINCIPLED.items():
-                    if k in r and inp in n.inputs:
-                        v = r[k]
-                        n.inputs[inp].default_value = (tuple(v) + (1.0,))[:4] if k == 'base_color' else float(v)
-                touched.append(m.name)
-    if not touched:
-        raise BadInput('finish %r matches no material with a Principled BSDF' % name)
-    return sorted(set(touched))
 
 
 def use_nodes(idblock):
@@ -326,9 +301,9 @@ def use_nodes(idblock):
 
 
 def _override(name, color, metallic, roughness):
+    import kit
     m = bpy.data.materials.new(name)
-    use_nodes(m)
-    b = next(n for n in m.node_tree.nodes if n.type == 'BSDF_PRINCIPLED')
+    b = kit.principled(m)
     b.inputs['Base Color'].default_value = color
     b.inputs['Metallic'].default_value = metallic
     b.inputs['Roughness'].default_value = roughness
@@ -339,23 +314,27 @@ def _world(name):
     w = bpy.data.worlds.new(name)
     nt = use_nodes(w)
     bpy.context.scene.world = w
-    if 'Background' not in nt.nodes:
+    if not any(n.type == 'BACKGROUND' for n in nt.nodes):
         bg = nt.nodes.new('ShaderNodeBackground')
-        bg.name = 'Background'
         out = next((n for n in nt.nodes if n.type == 'OUTPUT_WORLD'), None) or nt.nodes.new('ShaderNodeOutputWorld')
         nt.links.new(bg.outputs[0], out.inputs['Surface'])
-    return w, nt
+    return w, nt, next(n for n in nt.nodes if n.type == 'BACKGROUND')
 
 
-def apply_mode(mode, finish, finishes):
+def apply_mode(mode, look, finishes, lo, hi):
     """Prepare the scene for one review mode. Returns a description written into the JSON results."""
+    import kit
     sc = bpy.context.scene
     vl = bpy.context.view_layer
-    info = dict(mode=mode, finish=finish or 'scene')
-    if finish and finish != 'scene' and finish not in finishes:
-        raise BadInput('finish %r not found (have: %s)' % (finish, ', '.join(sorted(finishes)) or 'none'))
+    if look and not finishes:
+        raise BadInput('look %r asked for, but there is no data/finishes.json' % look)
+    try:
+        name, studio, missing = kit.apply_look(finishes, look) if finishes else (None, 'soft', [])
+    except KeyError as e:
+        raise BadInput(str(e).strip('"'))
+    info = dict(mode=mode, look=name)
     if mode == 'lit':
-        info['finish_materials'] = apply_finish(finish, finishes)
+        info.update(studio=studio, rig=kit.build_studio(studio, lo, hi), slots_not_in_scene=missing)
         return info
     for ob in sc.objects:
         if ob.type == 'LIGHT':
@@ -363,21 +342,20 @@ def apply_mode(mode, finish, finishes):
     sc.view_settings.view_transform = 'Standard'
     if mode == 'clay':
         vl.material_override = _override('rg clay', (0.55, 0.55, 0.55, 1), 0.0, 0.45)
-        w, nt = _world('rg clay world')
-        bg = nt.nodes['Background']
+        w, nt, bg = _world('rg clay world')
         bg.inputs['Color'].default_value = (0.35, 0.35, 0.35, 1)
         ld = bpy.data.lights.new('rg clay sun', 'SUN')
         ld.energy = 3.0
         ld.angle = math.radians(8)
-        lo = bpy.data.objects.new('rg clay sun', ld)
-        sc.collection.objects.link(lo)
+        sun = bpy.data.objects.new('rg clay sun', ld)
+        sc.collection.objects.link(sun)
         d = Vector((-0.55, -0.45, 0.70)).normalized()          # light from the front left, above
-        lo.rotation_euler = (-d).to_track_quat('-Z', 'Y').to_euler()
+        sun.rotation_euler = (-d).to_track_quat('-Z', 'Y').to_euler()
         info['rig'] = 'grey 0.55 roughness 0.45; world 0.35; sun 3 from front-left-above; scene lights off'
     else:
         vl.material_override = _override('rg zebra', (0.9, 0.9, 0.9, 1), 1.0, 0.02)
-        w, nt = _world('rg zebra world')
-        N = nt.nodes
+        w, nt, bg = _world('rg zebra world')
+        N, L = nt.nodes, nt.links
         tc = N.new('ShaderNodeTexCoord')
         sep = N.new('ShaderNodeSeparateXYZ')
         asin = N.new('ShaderNodeMath')
@@ -391,28 +369,45 @@ def apply_mode(mode, finish, finishes):
         lt = N.new('ShaderNodeMath')
         lt.operation = 'LESS_THAN'
         lt.inputs[1].default_value = 0.5
-        L = nt.links
         L.new(tc.outputs['Generated'], sep.inputs[0])
         L.new(sep.outputs['Z'], asin.inputs[0])
         L.new(asin.outputs[0], scl.inputs[0])
         L.new(scl.outputs[0], fr.inputs[0])
         L.new(fr.outputs[0], lt.inputs[0])
-        L.new(lt.outputs[0], N['Background'].inputs['Color'])
-        N['Background'].inputs['Strength'].default_value = 1.0
-        info['rig'] = ('mirror override; world of %d white stripes evenly spaced in elevation, each %.2f degrees '
-                       'of a %.2f degree period; scene lights off' % (ZEBRA_STRIPES, 90.0 / ZEBRA_STRIPES,
-                                                                      180.0 / ZEBRA_STRIPES))
+        L.new(lt.outputs[0], bg.inputs['Color'])
+        bg.inputs['Strength'].default_value = 1.0
+        info['rig'] = ('mirror override; a world of %d white stripes evenly spaced in elevation, %.2f degrees each '
+                       'in a %.2f degree period; scene lights off' % (ZEBRA_STRIPES, 90.0 / ZEBRA_STRIPES,
+                                                                       180.0 / ZEBRA_STRIPES))
         info['stripes'] = ZEBRA_STRIPES
     return info
 
 
 def hide_objects(patterns):
+    """Hide objects whose name or registered part name matches. Returns the hidden objects' names."""
     hidden = []
     for ob in bpy.context.scene.objects:
-        if patterns and match(ob.name, patterns) and not ob.hide_render:
+        if patterns and (match(ob.name, patterns) or match(str(ob.get('rg_part', '')), patterns)) \
+                and not ob.hide_render:
             ob.hide_render = True
+            ob.hide_viewport = True           # also out of the way of every ray the tools cast
             hidden.append(ob.name)
+    if hidden:
+        bpy.context.view_layer.update()
     return hidden
+
+
+def registered(prop, value=True):
+    """Objects the kit registered with a property, e.g. registered('rg_panel')."""
+    return [o for o in visible_geometry() if o.get(prop) == value]
+
+
+def part_objects(name):
+    """Geometry objects registered under a part name, else the object of that name."""
+    obs = [o for o in bpy.context.scene.objects if o.type in GEOMETRY and o.get('rg_part') == name]
+    if not obs and name in bpy.context.scene.objects and bpy.context.scene.objects[name].type in GEOMETRY:
+        obs = [bpy.context.scene.objects[name]]
+    return obs
 
 
 def render_to(path):
@@ -448,13 +443,15 @@ def camera_object(name, sensor_fit='HORIZONTAL'):
 
 
 def camera_from_view(name, c, scale=1.0):
-    """A Blender camera matching one cameras.json entry (pinhole, mm, OpenCV axes). Sets the scene resolution."""
+    """A Blender camera matching one cameras.json entry (mm, OpenCV axes; perspective or orthographic).
+    Sets the scene resolution to the view's picture size times scale."""
     try:
         R = np.array(c['rotation'], float)
         C = np.array(c['position_mm'], float)
-        f = float(c['focal_px'])
         cx, cy = [float(v) for v in c['centre_px']]
         w, h = int(c['width']), int(c['height'])
+        ortho = c.get('kind', 'perspective') == 'orthographic'
+        f = float(c['scale_px_per_mm'] if ortho else c['focal_px'])
     except (KeyError, TypeError, ValueError) as e:
         raise BadInput('camera %r is incomplete: %s' % (name, e))
     sc = bpy.context.scene
@@ -467,7 +464,12 @@ def camera_from_view(name, c, scale=1.0):
         M[i][3] = C[i] / mm_per_unit()
     ob.matrix_world = M
     cd = ob.data
-    cd.lens = f * 36.0 / w
+    if ortho:
+        cd.type = 'ORTHO'
+        cd.ortho_scale = max(w, h) / f / mm_per_unit()
+        cd.sensor_fit = 'AUTO'
+    else:
+        cd.lens = f * 36.0 / w
     big = max(w, h)
     cd.shift_x = ((w - 1) / 2.0 - cx) / big          # shifting the frame right moves the centre pixel left
     cd.shift_y = (cy - (h - 1) / 2.0) / big

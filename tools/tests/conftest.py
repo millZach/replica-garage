@@ -12,14 +12,16 @@ sys.dont_write_bytecode = True
 TOOLS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, TOOLS)
 
-from _common import Camera, look_at  # noqa: E402
+from _common import Camera, OrthoCamera, look_at  # noqa: E402,F401
 
 ENV = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', PYTHONIOENCODING='utf-8')
 
 # The synthetic "vehicle": a box with known dimensions (mm, vehicle coordinates).
 BOX = dict(x0=-900.0, x1=3300.0, y=900.0, z0=0.0, z1=1300.0)
 DIMS = dict(length=4200.0, width=1800.0, height=1300.0, wheelbase=2500.0, track_front=1560.0, track_rear=1580.0,
-            tyre_diameter_front=660.0, tyre_diameter_rear=680.0)
+            overhang_front=900.0, tyre_diameter_front=660.0, tyre_diameter_rear=680.0, tyre_width_front=200.0,
+            tyre_width_rear=220.0, rim_diameter_front=500.0, rim_diameter_rear=520.0)
+VEHICLE = dict(maker='Synthetic', model='Box', generation='1', years='2000', trim='test', dimensions=DIMS)
 
 
 def run_tool(name, *args, timeout=300):
@@ -56,9 +58,15 @@ def project(tmp_path):
     """A project folder with vehicle.json for the box and its folders."""
     for d in ('refs/photos', 'refs/masks', 'data', 'evidence/round-01', 'accepted'):
         os.makedirs(tmp_path / d, exist_ok=True)
-    write_json(tmp_path / 'data' / 'vehicle.json', {'variant': 'synthetic box', 'dimensions': DIMS,
-                                                    'points': box_corners()})
+    write_json(tmp_path / 'data' / 'vehicle.json', dict(VEHICLE, points=box_corners()))
     return tmp_path
+
+
+def blank_picture(path, w, h, rgb=(200, 200, 200)):
+    from PIL import Image
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    Image.new('RGB', (int(w), int(h)), rgb).save(path)
+    return path
 
 
 # ------------------------------------------------------------------ Blender

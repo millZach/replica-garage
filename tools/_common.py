@@ -41,11 +41,16 @@ class ArgParser(argparse.ArgumentParser):
 
 
 def run(main):
-    """Call main(argv) and map BadInput to exit 2. main returns the exit code."""
+    """Call main(argv); bad input and crashes exit 2. main returns the exit code."""
     try:
         code = main(sys.argv[1:])
     except BadInput as e:
         sys.stderr.write('bad input: %s\n' % e)
+        code = EXIT_BAD
+    except Exception:                       # a crash is not a failed gate
+        import traceback
+        traceback.print_exc()
+        sys.stderr.write('the tool stopped on an unexpected error\n')
         code = EXIT_BAD
     sys.exit(code)
 
@@ -123,6 +128,7 @@ def look_at(C, at, up=(0, 0, 1)):
 
 class Camera:
     """Pinhole camera in vehicle millimetres; see the module docstring for the convention."""
+    kind = 'perspective'
 
     def __init__(self, C, R, f, cx, cy, width, height):
         self.C = np.asarray(C, float)
@@ -140,8 +146,17 @@ class Camera:
     def depth(self, X):
         return self.cam_coords(X)[:, 2]
 
+    def mm_per_px(self, X):
+        """Millimetres on the vehicle per pixel at each point."""
+        return self.depth(X) / self.f
+
+    def ray(self, uv):
+        """Origin and unit direction (world) of the ray through pixel uv."""
+        d = np.array([(uv[0] - self.cx) / self.f, (uv[1] - self.cy) / self.f, 1.0]) @ self.R
+        return self.C.copy(), d / np.linalg.norm(d)
+
     def as_dict(self):
-        return dict(width=self.width, height=self.height, position_mm=self.C.tolist(),
+        return dict(kind=self.kind, width=self.width, height=self.height, position_mm=self.C.tolist(),
                     rotation=self.R.tolist(), rotation_vector=rotation_vector(self.R).tolist(),
                     focal_px=self.f, centre_px=[self.cx, self.cy],
                     forward=self.R[2].tolist(), up=(-self.R[1]).tolist())
@@ -150,10 +165,36 @@ class Camera:
     def from_dict(d):
         try:
             R = np.array(d['rotation'], float) if 'rotation' in d else rodrigues(d['rotation_vector'])
+            if d.get('kind', 'perspective') == 'orthographic':
+                return OrthoCamera(d['position_mm'], R, d['scale_px_per_mm'], d['centre_px'][0], d['centre_px'][1],
+                                   d['width'], d['height'])
             return Camera(d['position_mm'], R, d['focal_px'], d['centre_px'][0], d['centre_px'][1],
                           d['width'], d['height'])
         except (KeyError, TypeError, ValueError, IndexError) as e:
             raise BadInput('camera entry is incomplete: %s' % e)
+
+
+class OrthoCamera(Camera):
+    """A drawing's camera: u = cx + s * x_cam, v = cy + s * y_cam, with s in px per mm. C is a point on the
+    viewing axis, well in front of the vehicle; the axis convention is the same as the pinhole camera's."""
+    kind = 'orthographic'
+
+    def project(self, X):
+        Xc = self.cam_coords(X)
+        return np.stack([self.cx + self.f * Xc[:, 0], self.cy + self.f * Xc[:, 1]], 1)
+
+    def mm_per_px(self, X):
+        return np.full(len(np.atleast_2d(X)), 1.0 / self.f)
+
+    def ray(self, uv):
+        o = self.C + self.R[0] * (uv[0] - self.cx) / self.f + self.R[1] * (uv[1] - self.cy) / self.f
+        return o, self.R[2].copy()
+
+    def as_dict(self):
+        d = Camera.as_dict(self)
+        d.pop('focal_px')
+        d['scale_px_per_mm'] = self.f
+        return d
 
 
 def load_cameras(path):
@@ -183,6 +224,21 @@ def open_image(path, what='picture'):
     except Exception as e:
         raise BadInput('%s cannot be read: %s (%s)' % (what, path, e))
     return im
+
+
+def view_picture(project, file, crop=None, what='picture'):
+    """The picture of one view: the file, cut to its crop when it has one. Returns (PIL image, (u0, v0))."""
+    path = file if os.path.isabs(file) else os.path.join(project, file)
+    im = open_image(path, what)
+    if crop:
+        try:
+            u0, v0, u1, v1 = [int(round(float(c))) for c in crop]
+        except (TypeError, ValueError):
+            raise BadInput('%s: crop must be [u0, v0, u1, v1]' % what)
+        if not (0 <= u0 < u1 <= im.width and 0 <= v0 < v1 <= im.height):
+            raise BadInput('%s: crop %s lies outside the %dx%d file' % (what, crop, im.width, im.height))
+        return im.crop((u0, v0, u1, v1)), (u0, v0)
+    return im, (0, 0)
 
 
 def find_image(folder, stem, exts=('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.webp', '.bmp')):
@@ -215,3 +271,50 @@ def mask_boundary(mask):
         return np.zeros_like(mask)
     er = ndimage.binary_erosion(mask, structure=np.ones((3, 3), bool), border_value=0)
     return mask & ~er
+
+
+# ------------------------------------------------------------------ limits
+
+DEFAULT_LIMITS = {
+    'camera_rms_mm': 12.0,
+    'min_precise_views': 3,
+    'dimension_error_mm': 10.0,
+    'outline_median_px': 3.0,
+    'outline_p95_px': 8.0,
+    'outline_ref_width_px': 1600.0,
+    'fairness_p99_deg': 2.5,
+    'fairness_max_deg': 5.0,
+    'seating_step_mm': 3.0,
+    'double_skin_count': 0,
+    'separation_overlap_mm': 0.5,
+}
+TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def read_limits(path):
+    d = load_json(path, 'limits file')
+    if not isinstance(d, dict):
+        raise BadInput('%s must hold a JSON object of gate: number' % path)
+    out = {}
+    for k, v in d.items():
+        if k.startswith('_'):
+            continue                                    # comments
+        if k not in DEFAULT_LIMITS:
+            raise BadInput('%s: unknown limit %r (known: %s)' % (path, k, ', '.join(DEFAULT_LIMITS)))
+        out[k] = number(v, k)
+    return out
+
+
+def project_limits(project, path=None):
+    """Limits for a project: built-in defaults, overlaid by tools/default_limits.json, then by the project's
+    data/limits.json (or `path`). Returns (limits, the file used last or None)."""
+    lim = dict(DEFAULT_LIMITS)
+    used = None
+    for p in (os.path.join(TOOLS_DIR, 'default_limits.json'),
+              path or os.path.join(project, 'data', 'limits.json')):
+        if p and os.path.isfile(p):
+            lim.update(read_limits(p))
+            used = p
+        elif p is path and path:
+            raise BadInput('limits file not found: %s' % path)
+    return lim, used

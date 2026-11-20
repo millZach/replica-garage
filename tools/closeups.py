@@ -1,9 +1,13 @@
 """A ring of close views over both sides, the front, the rear and the roof, with coverage measured. (Blender)
 
-usage: blender -b <scene.blend> --python tools/closeups.py -- --out DIR [--size-mm 600] [--mode clay]
-       [--finish NAME] [--finishes FILE] [--resolution 800] [--lens 50] [--overlap 0.25] [--objects globs]
+usage: blender -b <scene.blend> --python tools/closeups.py -- --out DIR [--project DIR] [--size-mm 600]
+       [--mode lit|clay|zebra] [--look NAME] [--hide parts] [--resolution 800] [--lens 50] [--overlap 0.25]
        [--regions left,right,front,rear,roof] [--skip-regions R] [--min-coverage 0.95] [--samples-surface 4000]
-       [--no-render] [--engine CYCLES] [--device CPU|GPU] [--gpu-type T] [--samples 64] [--hide globs]
+       [--no-render] [--device CPU|GPU] [--gpu-type T] [--samples N]
+
+This is the close-up ring. Mode defaults to lit, under the look (default the proof look in data/finishes.json)
+and its studio. Sampling and device come from data/render.json, as for render_views.py. --hide <part> leaves
+parts out (by registered part name or object name), to look at what a removed panel uncovers.
 
 Each view frames a square of --size-mm on the surface, looking straight in along the region's axis. Views are laid
 on a grid over each face of the vehicle's bounding box with --overlap between neighbours; each is aimed at the
@@ -30,8 +34,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _blender as B  # noqa: E402
 from _common import ArgParser, BadInput, EXIT_GATE, EXIT_OK, save_json  # noqa: E402
 
-USAGE = ('blender -b <scene.blend> --python tools/closeups.py -- --out DIR [--size-mm 600] [--mode clay] '
-         '[--finish NAME] [--resolution 800] [--min-coverage 0.95] [--no-render]')
+USAGE = ('blender -b <scene.blend> --python tools/closeups.py -- --out DIR [--project DIR] [--size-mm 600] '
+         '[--mode lit|clay|zebra] [--look NAME] [--hide parts] [--min-coverage 0.95] [--no-render]')
 REGIONS = {  # name: (look direction, the two in-plane axes used for the grid and the name, up vector)
     'left': ((0, 1, 0), (0, 2), (0, 0, 1)),
     'right': ((0, -1, 0), (0, 2), (0, 0, 1)),
@@ -184,6 +188,7 @@ def main(argv):
     ap.add_argument('--min-coverage', type=float, default=0.95)
     ap.add_argument('--samples-surface', type=int, default=4000)
     ap.add_argument('--no-render', action='store_true')
+    B.add_project_arg(ap)
     B.add_render_args(ap)
     a = ap.parse(argv)
     regions = B.globs(a.regions)
@@ -197,11 +202,11 @@ def main(argv):
         raise BadInput('size, overlap, resolution or lens out of range')
     if a.samples_surface < 10:
         raise BadInput('--samples-surface must be at least 10')
-    s, _ = B.render_settings(a)
-    finishes = B.load_finishes(a.finishes)
-    if a.finishes and not os.path.isfile(a.finishes):
-        raise BadInput('finishes file not found: %s' % a.finishes)
-    B.hide_objects(B.globs(a.hide))
+    project = B.project_dir(a)
+    mode = a.mode or 'lit'
+    s, _, write_to = B.render_settings(a, os.path.join(project, 'data', 'render.json'))
+    finishes = B.load_finishes(project)
+    hidden = B.hide_objects(B.globs(a.hide))
     geo = B.visible_geometry(B.globs(a.objects) or None)
     if not geo:
         raise BadInput('no geometry to look at')
@@ -224,7 +229,7 @@ def main(argv):
     look = None
     if not a.no_render:
         dev = B.setup_render(s)
-        look = B.apply_mode(s['mode'], s['finish'], finishes)
+        look = B.apply_mode(mode, a.look, finishes, lo, hi)
         s.update(dev)
     rows = []
     for v in views:
@@ -240,7 +245,10 @@ def main(argv):
                          direction=d.tolist(), camera_mm=(v['camera'] * unit).tolist(), up=v['up'].tolist(),
                          lens_mm=a.lens, sensor_mm=36.0, resolution=[a.resolution, a.resolution],
                          distance_mm=dist * unit, file=f))
-    res = dict(size_mm=a.size_mm, overlap=a.overlap, render=None if a.no_render else dict(s, look=look),
+    if not a.no_render:
+        B.write_settings(write_to, s, dev)
+    res = dict(size_mm=a.size_mm, overlap=a.overlap, mode=mode, hidden=hidden,
+               render=None if a.no_render else dict(s, look=look),
                regions=regions, skipped_regions=skip, min_coverage=a.min_coverage, coverage=stats, views=rows,
                passed=bool(ok))
     save_json(os.path.join(a.out, 'closeups.json'), res)

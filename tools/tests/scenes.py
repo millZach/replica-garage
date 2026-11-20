@@ -1,4 +1,5 @@
 """Build the small synthetic test scenes in one headless Blender run (metres, vehicle axes).
+Objects are registered through the kit, as a module's build(ctx) would.
 
 blender -b --factory-startup --python tools/tests/scenes.py -- <out_dir>
 """
@@ -6,72 +7,53 @@ import math
 import os
 import sys
 
-import bpy
 import bmesh
+import bpy
+from mathutils import Matrix
 
 OUT = sys.argv[sys.argv.index('--') + 1]
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import kit  # noqa: E402
 
 
 def empty_scene():
     bpy.ops.wm.read_factory_settings(use_empty=True)
     sc = bpy.context.scene
     sc.unit_settings.system = 'METRIC'
-    return sc
+    ctx = kit.Context()
+    return ctx
 
 
-def material(name, rgb=(0.6, 0.1, 0.1)):
-    m = bpy.data.materials.new(name)
-    try:
-        m.use_nodes = True
-    except AttributeError:
-        pass
-    for n in m.node_tree.nodes:
-        if n.type == 'BSDF_PRINCIPLED':
-            n.inputs['Base Color'].default_value = rgb + (1,)
-    return m
-
-
-def mesh_object(name, verts, faces, mat=None, origin=None):
+def mesh_object(name, verts, faces):
     me = bpy.data.meshes.new(name)
     me.from_pydata(verts, [], faces)
     me.update()
-    ob = bpy.data.objects.new(name, me)
-    bpy.context.scene.collection.objects.link(ob)
-    if mat:
-        me.materials.append(mat)
-    if origin is not None:
-        ox, oy, oz = origin
-        me.transform(__import__('mathutils').Matrix.Translation((-ox, -oy, -oz)))
-        ob.location = origin
-    return ob
+    return bpy.data.objects.new(name, me)
 
 
-def box(name, x0, x1, y0, y1, z0, z1, mat=None, origin=None):
+def box(name, x0, x1, y0, y1, z0, z1):
     v = [(x, y, z) for x in (x0, x1) for y in (y0, y1) for z in (z0, z1)]
     f = [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)]
-    return mesh_object(name, v, f, mat, origin)
+    return mesh_object(name, v, f)
 
 
-def wheel(name, x, y, r, width, mat):
+def wheel(name, x, y, r, width):
     bm = bmesh.new()
     bmesh.ops.create_cone(bm, cap_ends=True, segments=32, radius1=r, radius2=r, depth=width)
+    bmesh.ops.rotate(bm, verts=bm.verts, cent=(0, 0, 0), matrix=Matrix.Rotation(math.pi / 2, 3, 'X'))
     me = bpy.data.meshes.new(name)
     bm.to_mesh(me)
     bm.free()
     ob = bpy.data.objects.new(name, me)
-    bpy.context.scene.collection.objects.link(ob)
-    me.materials.append(mat)
-    ob.rotation_euler = (math.pi / 2, 0, 0)
     ob.location = (x, y, r)
     return ob
 
 
-def sun():
-    ld = bpy.data.lights.new('key', 'SUN')
-    ld.energy = 3
-    ob = bpy.data.objects.new('key', ld)
-    bpy.context.scene.collection.objects.link(ob)
-    ob.rotation_euler = (0.6, 0.2, 0.8)
+def register(ctx, assembly, ob, slot, **kw):
+    ctx.assembly = assembly
+    ob.data.materials.append(ctx.material(slot))
+    ctx.add(ob, **kw)
+    return ob
 
 
 def save(name):
@@ -79,25 +61,23 @@ def save(name):
 
 
 # plain: one painted box, the "vehicle" of the camera tests: 4200 x 1800, from 150 to 1300 mm up
-empty_scene()
-paint = material('Paint body')
-box('body', -0.9, 3.3, -0.9, 0.9, 0.15, 1.3, paint)
-sun()
+ctx = empty_scene()
+register(ctx, 'body', box('body', -0.9, 3.3, -0.9, 0.9, 0.15, 1.3), 'body', part='body shell', panel=True)
 save('plain')
 
 # car: the box on four wheels; wheelbase 2500, track 1560 front and 1580 rear, wheels 660 / 680 mm
-empty_scene()
-paint, rubber = material('Paint body'), material('Rubber', (0.02, 0.02, 0.02))
-box('body', -0.9, 3.3, -0.9, 0.9, 0.15, 1.3, paint)
+ctx = empty_scene()
+register(ctx, 'body', box('body', -0.9, 3.3, -0.9, 0.9, 0.15, 1.3), 'body', part='body shell', panel=True)
 for nm, x, y, d in (('wheel_fl', 0.0, -0.78, 0.66), ('wheel_fr', 0.0, 0.78, 0.66),
                     ('wheel_rl', 2.5, -0.79, 0.68), ('wheel_rr', 2.5, 0.79, 0.68)):
-    wheel(nm, x, y, d / 2, 0.2, rubber)
-sun()
+    w = register(ctx, 'hardware', wheel(nm, x, y, d / 2, 0.2), 'tyre', part=nm)
+    if nm.startswith('wheel_f'):
+        ctx.steerable(w, 'left' if nm.endswith('l') else 'right')
 save('car')
 
 
-# fair: a gently curved panel and a panel with a 30 degree fold marked as a crease
-def grid_panel(name, fold_deg=0.0, n=40, size=1.0, radius=3.0):
+# fair: a gently curved panel, one with a 30 degree fold marked as a crease, one with the fold unmarked
+def grid_panel(name, fold_deg=0.0, n=40, size=1.0, radius=3.0, x_off=0.0):
     verts, faces = [], []
     for i in range(n + 1):
         for j in range(n + 1):
@@ -106,65 +86,57 @@ def grid_panel(name, fold_deg=0.0, n=40, size=1.0, radius=3.0):
             x, z = radius * math.sin(ang), radius * (1 - math.cos(ang))
             if fold_deg and v > size / 2:
                 t = v - size / 2
-                v, dz = size / 2 + t * math.cos(math.radians(fold_deg)), t * math.sin(math.radians(fold_deg))
-                z += dz
-            verts.append((x, v, z))
+                v, z = size / 2 + t * math.cos(math.radians(fold_deg)), z + t * math.sin(math.radians(fold_deg))
+            verts.append((x + x_off, v, z))
     for i in range(n):
         for j in range(n):
             a = i * (n + 1) + j
             faces.append((a, a + n + 1, a + n + 2, a + 1))
-    ob = mesh_object(name, verts, faces, material('Paint ' + name))
-    if fold_deg:
-        me = ob.data
-        at = me.attributes.new('fold', 'BOOLEAN', 'EDGE')
-        mid = n // 2
-        for e in me.edges:
-            a, b = e.vertices
-            ja, jb = a % (n + 1), b % (n + 1)
-            at.data[e.index].value = (ja == mid and jb == mid)
-    return ob
+    ob = mesh_object(name, verts, faces)
+    fold = [(i * (n + 1) + n // 2, (i + 1) * (n + 1) + n // 2) for i in range(n)]
+    return ob, fold
 
 
-empty_scene()
-grid_panel('panel_smooth')
-p = grid_panel('panel_creased', fold_deg=30.0)
-p.location.x = 2.0
+ctx = empty_scene()
+p, _ = grid_panel('panel_smooth')
+register(ctx, 'body', p, 'body', panel=True)
+p, fold = grid_panel('panel_creased', fold_deg=30.0, x_off=2.0)
+register(ctx, 'body', p, 'body', panel=True)
+ctx.crease(p, fold)
+p, _ = grid_panel('panel_unmarked', fold_deg=30.0, x_off=4.0)
+register(ctx, 'body', p, 'body', panel=True)
 save('fair')
 
-# seat: a panel with a square opening, a lamp seated 2 mm proud and one sitting 6 mm proud
-empty_scene()
+# seat: a bumper with a square opening, a lamp seated 2 mm proud and one sitting 6 mm proud
+ctx = empty_scene()
 o, i = 0.5, 0.2
 verts = [(-o, -o, 0), (o, -o, 0), (o, o, 0), (-o, o, 0), (-i, -i, 0), (i, -i, 0), (i, i, 0), (-i, i, 0)]
-faces = [(0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
-mesh_object('panel', verts, faces, material('Paint panel'))
+register(ctx, 'body', mesh_object('bumper skin', verts, [(0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]),
+         'body', part='bumper', panel=True)
 for nm, dz in (('lamp_ok', 0.002), ('lamp_proud', 0.006)):
     s = 0.199
-    mesh_object(nm, [(-s, -s, dz), (s, -s, dz), (s, s, dz), (-s, s, dz)], [(0, 1, 2, 3)], material('Lens ' + nm))
+    register(ctx, 'front', mesh_object(nm + ' lens', [(-s, -s, dz), (s, -s, dz), (s, s, dz), (-s, s, dz)],
+                                       [(0, 1, 2, 3)]), 'lens', part=nm)
 save('seat')
 
-# sep: closed parts; door touches the wing, the bonnet pushes 5 mm into it, one part has its pivot far away
-empty_scene()
-box('wing', 0.0, 1.0, 0.0, 0.5, 0.0, 0.5, material('Paint wing'))
-box('door', 1.0, 2.0, 0.0, 0.5, 0.0, 0.5, material('Paint door'), origin=(1.0, 0.0, 0.25))      # hinge at front
-box('bonnet', -0.995, 0.005, 0.05, 0.45, 0.05, 0.45, material('Paint bonnet'), origin=(-0.5, 0.25, 0.25))
-box('far_pivot', 3.0, 3.5, 0.0, 0.5, 0.0, 0.5, material('Paint far'), origin=(10.0, 10.0, 10.0))
+# sep: closed parts; the door touches the wing, the bonnet pushes 5 mm into it, one pivot sits far away
+ctx = empty_scene()
+register(ctx, 'body', box('wing', 0.0, 1.0, 0.0, 0.5, 0.0, 0.5), 'body', part='wing', panel=True)
+register(ctx, 'body', box('door', 1.0, 2.0, 0.0, 0.5, 0.0, 0.5), 'body', part='door', panel=True, separable=True,
+         pivot=[1000.0, 0.0, 250.0])
+register(ctx, 'body', box('bonnet', -0.995, 0.005, 0.05, 0.45, 0.05, 0.45), 'body', part='bonnet', panel=True,
+         separable=True, pivot=[-500.0, 250.0, 250.0])
+register(ctx, 'body', box('boot lid', 3.0, 3.5, 0.0, 0.5, 0.0, 0.5), 'body', part='boot lid', separable=True,
+         pivot=[10000.0, 10000.0, 10000.0])
 save('sep')
 
-# rays: a single outer skin, and a join where a second painted skin lies 3 mm behind the first
-empty_scene()
-skin = material('Paint skin')
-mesh_object('skin_outer', [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)], [(0, 1, 2, 3)], skin)
-mesh_object('skin_inner', [(0.2, -1, -0.003), (1, -1, -0.003), (1, 1, -0.003), (0.2, 1, -0.003)], [(0, 1, 2, 3)],
-            material('Paint skin inner'))
-mesh_object('floor', [(-3, -3, -1), (3, -3, -1), (3, 3, -1), (-3, 3, -1)], [(0, 1, 2, 3)], material('Floor'))
-cd = bpy.data.cameras.new('cam_top')
-cd.lens = 36.0
-cd.sensor_width = 36.0
-cam = bpy.data.objects.new('cam_top', cd)
-bpy.context.scene.collection.objects.link(cam)
-cam.location = (0, 0, 3)
-bpy.context.scene.camera = cam
-bpy.context.scene.render.resolution_x = 200
-bpy.context.scene.render.resolution_y = 100
+# rays: an outer skin, and a join where a second painted skin lies 3 mm behind it; an unpainted floor below
+ctx = empty_scene()
+register(ctx, 'body', mesh_object('skin_outer', [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)], [(0, 1, 2, 3)]),
+         'body', panel=True)
+register(ctx, 'body', mesh_object('skin_inner', [(0.2, -1, -0.003), (1, -1, -0.003), (1, 1, -0.003),
+                                                 (0.2, 1, -0.003)], [(0, 1, 2, 3)]), 'body', panel=True)
+register(ctx, 'stand', mesh_object('floor', [(-3, -3, -1), (3, -3, -1), (3, 3, -1), (-3, 3, -1)], [(0, 1, 2, 3)]),
+         'floor')
 save('rays')
 print('SCENES DONE')
