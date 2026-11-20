@@ -3,3 +3,6 @@ __pycache__/
 .pytest_cache/
 *.tmp
 *.blend1
+
+# videos stay out of the repo
+*.mp4
