@@ -130,6 +130,10 @@ def cameras(d, name='cameras.json'):
 
 def finishes(d, name='finishes.json'):
     _need(d, ('proof_look', 'looks'), name)
+    if 'style' in d and d['style'] not in ('showroom', 'studio', 'daylight'):
+        raise BadInput('%s: style must be showroom, studio or daylight' % name)
+    if 'sky' in d and not isinstance(d['sky'], str):
+        raise BadInput('%s: sky must be the path of an image under refs/' % name)
     if not isinstance(d['looks'], dict) or not d['looks']:
         raise BadInput('%s: "looks" must be a non-empty object' % name)
     if d['proof_look'] not in d['looks']:

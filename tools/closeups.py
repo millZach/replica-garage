@@ -3,12 +3,14 @@
 usage: blender -b <scene.blend> --python tools/closeups.py -- --out DIR [--project DIR] [--size-mm 600]
        [--mode lit|clay|zebra] [--look NAME] [--hide parts] [--resolution 800] [--lens 50] [--overlap 0.25]
        [--regions left,right,front,rear,roof] [--skip-regions R] [--min-coverage 0.95] [--samples-surface 4000]
-       [--no-render] [--device CPU|GPU] [--gpu-type T] [--samples N]
+       [--no-render] [--device CPU|GPU] [--gpu-type T] [--samples N] [--style S] [--sky FILE]
 
 This is the close-up ring. Mode defaults to lit, under the look (default the proof look in data/finishes.json)
 and its studio. Sampling and device come from data/render.json, as for render_views.py. --hide a,b,c leaves
 those registered parts out (names or globs), to look at what removed panels uncover; nested parts need all of
 them. It runs on whatever scene it is given (out/vehicle.blend, a round's workshop.blend) and writes to --out.
+--style showroom|studio|daylight (and --sky for daylight) renders the ring in a presentation style instead of the
+look's evidence studio.
 
 Each view frames a square of --size-mm on the surface, looking straight in along the region's axis. Views are laid
 on a grid over each face of the vehicle's bounding box with --overlap between neighbours; each is aimed at the
@@ -134,7 +136,8 @@ def coverage(objs, views, half, regions_measured, n_samples, eps, far):
     D = np.array([dirs[k] for k in names], float)
     t = math.tan(half)
     stats = {r: dict(samples=0, exposed=0, covered=0) for r in regions_measured}
-    cams = [(np.array(v['camera']), np.array(v['direction']), np.array(v['up'])) for v in views]
+    cams = [(np.array(v['camera']), np.array(v['direction']), np.array(v['up']), v.get('tan', (t, t)))
+            for v in views]
     for p, n in zip(pts, nrm):
         out_pos = any(escapes(p, d, eps, far) for d in tilt_dirs(n))
         if not out_pos:                 # normals may point inward: try the other side
@@ -153,7 +156,7 @@ def coverage(objs, views, half, regions_measured, n_samples, eps, far):
         st = stats[reg]
         st['samples'] += 1
         st['exposed'] += 1
-        for C, fwd, up in cams:
+        for C, fwd, up, (tx, ty) in cams:
             rel = p - C
             z = rel @ fwd
             if z <= 0:
@@ -161,7 +164,7 @@ def coverage(objs, views, half, regions_measured, n_samples, eps, far):
             right = np.cross(fwd, up)
             right /= np.linalg.norm(right)
             upv = np.cross(right, fwd)
-            if abs(rel @ right) > t * z or abs(rel @ upv) > t * z:
+            if abs(rel @ right) > tx * z or abs(rel @ upv) > ty * z:
                 continue
             to_cam = -rel / np.linalg.norm(rel)
             if n @ to_cam < FACING_COS:
@@ -191,6 +194,7 @@ def main(argv):
     ap.add_argument('--no-render', action='store_true')
     B.add_project_arg(ap)
     B.add_render_args(ap)
+    B.add_style_args(ap)
     a = ap.parse(argv)
     regions = B.globs(a.regions)
     skip = B.globs(a.skip_regions)
@@ -207,6 +211,7 @@ def main(argv):
     mode = a.mode or 'lit'
     s, _, write_to = B.render_settings(a, os.path.join(project, 'data', 'render.json'))
     finishes = B.load_finishes(project)
+    style, sky = B.resolve_style(a, finishes, project) if a.style else (None, None)
     hidden = B.hide_objects(B.globs(a.hide))
     geo = B.visible_geometry(B.globs(a.objects) or None)
     if not geo:
@@ -230,7 +235,8 @@ def main(argv):
     look = None
     if not a.no_render:
         dev = B.setup_render(s)
-        look = B.apply_mode(mode, a.look, finishes, lo, hi)
+        look = B.apply_style(style, sky, a.look, finishes, lo, hi) if style else \
+            B.apply_mode(mode, a.look, finishes, lo, hi)
         s.update(dev)
     rows = []
     for v in views:

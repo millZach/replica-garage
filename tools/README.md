@@ -13,6 +13,7 @@ usage when run with no arguments.
 | `compare.py` | Python | Board each picture beside its render and measure how far apart the silhouettes are. |
 | `dimensions.py` | Blender | Measure length, width, height, wheelbase, tracks and overhang against the maker's figures. |
 | `closeups.py` | Blender | Render the close-up ring over both sides, front, rear and roof, and prove the coverage. |
+| `orbit.py` | Blender | Render the vehicle from all round, and from above, under a look in a presentation style. |
 | `fairness.py` | Blender | Measure the angle between neighbouring faces of each painted panel, away from marked creases. |
 | `rays.py` | Blender | List every surface camera rays pass through, and find double skins. |
 | `seating.py` | Blender | Measure the step between each seated part and its panel all round the part's edge. |
@@ -21,7 +22,7 @@ usage when run with no arguments.
 | `gates.py` | Python | Judge one round's evidence against the gate limits and write one overall result. |
 | `wait_for.py` | Python | Wait until a file exists and has stopped changing. |
 
-Also here: `kit.py`, what every module's `build(ctx)` receives and the studio presets; `default_limits.json`, the
+Also here: `kit.py`, what every module's `build(ctx)` receives, the studio presets and the presentation styles; `default_limits.json`, the
 starting gate limits; `_formats.py`, the checks for every file format in the contract; `_common.py` and
 `_blender.py`, shared code. The three underscore files are not run on their own.
 

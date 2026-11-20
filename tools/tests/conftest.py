@@ -86,12 +86,12 @@ def blender():
     return exe
 
 
-def run_blender(exe, blend, tool, *args, timeout=600):
+def run_blender(exe, blend, tool, *args, timeout=600, env=None):
     cmd = [exe, '-b']
     if blend:
         cmd.append(str(blend))
     cmd += ['--factory-startup', '--python', os.path.join(TOOLS, tool), '--'] + [str(a) for a in args]
-    return subprocess.run(cmd, capture_output=True, text=True, env=ENV, timeout=timeout,
+    return subprocess.run(cmd, capture_output=True, text=True, env=dict(ENV, **(env or {})), timeout=timeout,
                           encoding='utf-8', errors='replace')
 
 

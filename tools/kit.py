@@ -29,8 +29,9 @@ What the kit records, so the tools find panels, creases and parts in the saved s
   rg_steer     "left" or "right" for a steerable front wheel (it turns about its own origin's vertical axis)
 the boolean edge attribute rg_crease (ctx.crease) and the boolean face attribute rg_inner (ctx.inner).
 
-The render tools also use apply_look() and build_studio() here: a look sets every slot material from
-data/finishes.json; a studio preset (soft, gloss, dark-paint) lights the vehicle for lit renders.
+The render tools also use apply_look(), build_studio() and build_style() here: a look sets every slot material
+from data/finishes.json; a studio preset (soft, gloss, dark-paint) lights the vehicle for evidence renders; a
+presentation style (showroom, studio, daylight) dresses it for the pictures people look at.
 """
 import json
 import math
@@ -217,6 +218,139 @@ def build_studio(preset, lo, hi):
             _light('rg wall end', 'AREA', 500 * W * H, (c[0] + s * r, c[1], lo[2] + H), tgt, size=W * 2.5,
                    size_y=H * 3)
         desc = 'dark-paint: lit horizon band in the world and large lit walls on four sides'
+    return desc
+
+
+# ------------------------------------------------------------------ presentation styles
+
+STYLES = ('showroom', 'studio', 'daylight')
+
+
+def _style_object(name, verts, faces, mat):
+    me = bpy.data.meshes.new(name)
+    me.from_pydata(verts, [], faces)
+    me.update()
+    for p in me.polygons:
+        p.use_smooth = True
+    me.materials.append(mat)
+    ob = bpy.data.objects.new(name, me)
+    ob['rg_style'] = True                    # never part of the vehicle: every tool leaves these out
+    bpy.context.scene.collection.objects.link(ob)
+    return ob
+
+
+def _style_material(name, **settings):
+    m = bpy.data.materials.new(name)
+    set_slot(m, settings)
+    return m
+
+
+def _disc(radius, n=64, z=0.0):
+    verts = [(0.0, 0.0, z)] + [(radius * math.cos(2 * math.pi * i / n), radius * math.sin(2 * math.pi * i / n), z)
+                               for i in range(n)]
+    return verts, [(0, i + 1, (i + 1) % n + 1) for i in range(n)]
+
+
+def _ring(r0, r1, n=96, z=0.001):
+    verts, faces = [], []
+    for i in range(n):
+        a = 2 * math.pi * i / n
+        verts += [(r0 * math.cos(a), r0 * math.sin(a), z), (r1 * math.cos(a), r1 * math.sin(a), z)]
+    for i in range(n):
+        j = (i + 1) % n
+        faces.append((2 * i, 2 * i + 1, 2 * j + 1, 2 * j))
+    return verts, faces
+
+
+def _bowl(radius, wall, n=64, rings=8):
+    """A floor that curves up into a wall all round: a seamless backdrop with no horizon line."""
+    verts, faces = [(0.0, 0.0, 0.0)], []
+    prof = [(radius * k / rings, 0.0) for k in range(1, rings + 1)]
+    prof += [(radius + wall * (1 - math.cos(a)), wall * math.sin(a))
+             for a in [math.pi / 2 * k / rings for k in range(1, rings + 1)]]
+    prof += [(radius + wall, wall + wall * k / 2) for k in range(1, 3)]
+    for r, z in prof:
+        for i in range(n):
+            a = 2 * math.pi * i / n
+            verts.append((r * math.cos(a), r * math.sin(a), z))
+    for i in range(n):
+        faces.append((0, 1 + i, 1 + (i + 1) % n))
+    for k in range(len(prof) - 1):
+        b0, b1 = 1 + k * n, 1 + (k + 1) * n
+        for i in range(n):
+            j = (i + 1) % n
+            faces.append((b0 + i, b1 + i, b1 + j, b0 + j))
+    return verts, faces
+
+
+def build_style(style, lo, hi, sky=None):
+    """Light and surround the vehicle (bounds lo, hi in scene units) in a presentation style, for orbit.py and
+    closeups.py --style. Separate from the evidence studios: a style adds a floor or backdrop to the picture.
+
+    showroom  a dark room, a dark glossy floor, lit cards overhead and a lit ring on the floor round the vehicle
+    studio    a pale seamless backdrop curving up from the floor, broad soft light, a soft shadow on the ground
+    daylight  a sky dome from `sky`, an image file the project supplies (under refs/), on a plain ground
+    Every object made is tagged rg_style and centred under the vehicle. Scene lights are turned off. Returns a
+    description for the render log.
+    """
+    if style not in STYLES:
+        raise KeyError('style %r; styles are %s' % (style, ', '.join(STYLES)))
+    sc = bpy.context.scene
+    for ob in sc.objects:
+        if ob.type == 'LIGHT':
+            ob.hide_render = True
+    c = (np.asarray(lo) + np.asarray(hi)) / 2
+    L, W, H = [float(max(v, 1e-3)) for v in (hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2])]
+    half = math.hypot(L, W) / 2
+    tgt = (c[0], c[1], lo[2] + 0.4 * H)
+    big = half * 12
+
+    def place(ob):
+        ob.location = (c[0], c[1], 0.0)
+        return ob
+
+    if style == 'showroom':
+        _world('rg style showroom', (0.004, 0.004, 0.004), (0.01, 0.01, 0.01), (0.002, 0.002, 0.002))
+        place(_style_object('rg showroom floor', *_disc(big), _style_material(
+            'rg showroom floor', base_color=[0.015, 0.015, 0.016], roughness=0.12, coat=1.0, coat_roughness=0.05)))
+        place(_style_object('rg showroom ring', *_ring(half * 1.25, half * 1.32), _style_material(
+            'rg showroom ring', base_color=[0, 0, 0], emission=[1.0, 0.97, 0.92], emission_strength=6.0)))
+        for i, f in enumerate((-0.32, 0.0, 0.32)):
+            _light('rg showroom card %d' % i, 'AREA', 350 * L, (c[0] + f * L, c[1], hi[2] + 1.6 * H), tgt,
+                   size=W * 1.2, size_y=L * 0.12)
+        for s in (-1, 1):
+            _light('rg showroom side', 'AREA', 120 * L * H, (c[0], c[1] + s * half * 2.2, lo[2] + 1.2 * H), tgt,
+                   size=L * 1.2, size_y=H * 0.2)
+        desc = 'showroom: dark room, dark glossy floor, three lit cards overhead, a lit ring on the floor'
+    elif style == 'studio':
+        _world('rg style studio', (0.85, 0.85, 0.85), (0.8, 0.8, 0.8), (0.7, 0.7, 0.7))
+        place(_style_object('rg studio backdrop', *_bowl(half * 4, half * 2), _style_material(
+            'rg studio backdrop', base_color=[0.82, 0.82, 0.8], roughness=0.9)))
+        _light('rg studio key', 'AREA', 900 * L * W, (c[0], c[1], hi[2] + 2.5 * H), tgt, size=L * 2.0,
+               size_y=W * 3.0)
+        _light('rg studio fill', 'AREA', 300 * L * H, (c[0] - half * 2.5, c[1] - half * 2.5, lo[2] + 1.5 * H), tgt,
+               size=L * 2, size_y=H * 2)
+        desc = 'studio: pale seamless backdrop, broad soft light from above and one side, soft ground shadow'
+    else:
+        if not sky or not os.path.isfile(sky):
+            raise FileNotFoundError('the daylight style needs a sky image the project supplies (got %r)' % (sky,))
+        w = bpy.data.worlds.new('rg style daylight')
+        try:
+            w.use_nodes = True
+        except AttributeError:
+            pass
+        nt = w.node_tree
+        bg = next((n for n in nt.nodes if n.type == 'BACKGROUND'), None) or nt.nodes.new('ShaderNodeBackground')
+        out = next((n for n in nt.nodes if n.type == 'OUTPUT_WORLD'), None) or nt.nodes.new('ShaderNodeOutputWorld')
+        env = nt.nodes.new('ShaderNodeTexEnvironment')
+        env.image = bpy.data.images.load(sky, check_existing=True)
+        nt.links.new(env.outputs['Color'], bg.inputs['Color'])
+        nt.links.new(bg.outputs[0], out.inputs['Surface'])
+        sc.world = w
+        place(_style_object('rg daylight ground', *_disc(big), _style_material(
+            'rg daylight ground', base_color=[0.35, 0.35, 0.33], roughness=0.85)))
+        desc = 'daylight: sky dome from %s on a plain ground' % os.path.basename(sky)
+    sc.render.film_transparent = False
     return desc
 
 

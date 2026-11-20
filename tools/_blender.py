@@ -64,7 +64,7 @@ def visible_geometry(include=None, exclude=None):
     vl = bpy.context.view_layer
     out = []
     for ob in bpy.context.scene.objects:
-        if ob.type not in GEOMETRY or ob.hide_render or not ob.visible_get(view_layer=vl):
+        if ob.type not in GEOMETRY or ob.hide_render or not ob.visible_get(view_layer=vl) or ob.get('rg_style'):
             continue
         if include and not match(ob.name, include):
             continue
@@ -268,13 +268,21 @@ def setup_render(s):
             if found:
                 used = t
                 break
-        if not used:
-            raise BadInput('no GPU device found for %s' % ', '.join(types))
-        cy.device = 'GPU'
-        info.update(device='GPU', gpu_type=used)
+        if used:
+            cy.device = 'GPU'
+            names = [d.name for d in pr.devices if d.use]
+            info.update(device='GPU', gpu_type=used, devices=names)
+        else:
+            cy.device = 'CPU'
+            info.update(device='CPU', gpu_type=None, devices=['processor'],
+                        fallback='no %s device found; rendering on the processor' % ' or '.join(types))
+            print('DEVICE FALLBACK: a graphics card was asked for, but no %s device was found; '
+                  'rendering on the processor' % ' or '.join(types), flush=True)
     else:
         cy.device = 'CPU'
-        info.update(device='CPU', gpu_type=None)
+        info.update(device='CPU', gpu_type=None, devices=['processor'])
+    print('DEVICE %s %s' % (info['device'], ', '.join(([info['gpu_type']] if info.get('gpu_type') else []) +
+                                                       info['devices'])), flush=True)
     cy.samples = int(s['samples'])
     cy.use_adaptive_sampling = True
     cy.adaptive_threshold = float(s.get('adaptive_threshold', 0.02))
@@ -393,6 +401,44 @@ def apply_mode(mode, look, finishes, lo, hi):
                                                                        180.0 / ZEBRA_STRIPES))
         info['stripes'] = ZEBRA_STRIPES
     return info
+
+
+def add_style_args(ap):
+    ap.add_argument('--style', default=None, help='showroom, studio or daylight (default: "style" in finishes.json)')
+    ap.add_argument('--sky', default=None, help='sky image for daylight (default: "sky" in finishes.json)')
+
+
+def resolve_style(a, finishes, project, default=None):
+    """The presentation style to use: --style, else finishes.json "style", else `default` (None: no style).
+    Returns (style, sky path or None); bad input when daylight has no readable sky file."""
+    import kit
+    style = a.style or (finishes or {}).get('style') or default
+    if style is None:
+        return None, None
+    if style not in kit.STYLES:
+        raise BadInput('style %r; styles are %s' % (style, ', '.join(kit.STYLES)))
+    sky = None
+    if style == 'daylight':
+        sky = a.sky or (finishes or {}).get('sky')
+        if not sky:
+            raise BadInput('the daylight style needs a sky image: give --sky or "sky" in data/finishes.json')
+        sky = sky if os.path.isabs(sky) else os.path.join(project, sky)
+        if not os.path.isfile(sky):
+            raise BadInput('sky image not found: %s' % sky)
+    return style, sky
+
+
+def apply_style(style, sky, look, finishes, lo, hi):
+    """The look's slot materials, then a presentation style round the vehicle (kit.build_style)."""
+    import kit
+    if look and not finishes:
+        raise BadInput('look %r asked for, but there is no data/finishes.json' % look)
+    try:
+        name, _, missing = kit.apply_look(finishes, look) if finishes else (None, None, [])
+    except KeyError as e:
+        raise BadInput(str(e).strip('"'))
+    return dict(mode='lit', look=name, style=style, rig=kit.build_style(style, lo, hi, sky),
+                slots_not_in_scene=missing)
 
 
 def hide_objects(patterns):
