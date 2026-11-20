@@ -145,6 +145,8 @@ def test_dimensions_gate_fails_but_not_on_estimates(blender, scenes, project):
     d = read_json(out / 'dimensions.json')['dimensions']
     assert d['length']['error_mm'] == pytest.approx(-100.0, abs=0.5) and d['length']['passed'] is False
     assert d['width']['judged'] is False and d['width']['estimated'] is True
+    # a figure the maker never gave (width with mirrors here) is reported but not judged
+    assert d['width_mirrors']['maker_mm'] is None and d['width_mirrors']['judged'] is False
 
 
 def test_dimensions_bad_input(blender, scenes, project):
