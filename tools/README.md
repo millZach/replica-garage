@@ -8,21 +8,24 @@ usage when run with no arguments.
 |---|---|---|
 | `solve_cameras.py` | Python | Solve each photo's camera (and each drawing's flat camera) from known points, grade each view, triangulate a feature. |
 | `mask_photo.py` | Python | Make a view's silhouette mask: plain background, drawing (with optional `--close-px`), or seeded from a render. |
-| `accept.py` | Python | Freeze an accepted assembly under `accepted/<assembly>/NN/`, write its SHA-256 manifest, and update `build.json` lists. |
+| `accept.py` | Python | Freeze an accepted assembly under `accepted/<assembly>/NN/`, write its SHA-256 manifest, enforce Stage 1 macro triage (`--round`/`--triage`), and update `build.json` lists. |
 | `assemble.py` | Blender | Build the vehicle from the accepted, hash-checked modules in build order. |
 | `render_views.py` | Blender | Render the model through every solved camera (lit, clay or zebra) at the picture's size and steering angle. |
 | `compare.py` | Python | Board each picture beside its render and measure how far apart the silhouettes are (filling internal transparent holes by default). |
+| `compare_zones.py` | Python | Compose a 1:1 Hero Zone Comparison Sheet (`hero-zones.jpg`) placing reference and render side-by-side at matching scale for 5 configurable exterior zones. |
 | `dimensions.py` | Blender | Measure length, width, height, wheelbase, tracks and overhang against the maker's figures. |
 | `closeups.py` | Blender | Render the close-up ring over both sides, front, rear and roof, and prove exterior coverage (supports `--poses-from` and `--resume`). |
 | `orbit.py` | Blender | Render the vehicle from all round, and from above, under a look in a presentation style (supports `--poses-from` and `--resume`). |
 | `details.py` | Blender | Render repeatable hero exterior/cabin views with cutaway `hide`, `interior`/`strip-sweep` light, A/B toggles, and sightlines. |
 | `showroom.py` | Blender | Save a ready-to-open lit showroom `.blend` and optional `data/handoff.json` inventory for downstream tools. |
 | `fairness.py` | Blender | Measure neighbouring face angles and multi-scale surface waviness of each painted panel, away from marked creases. |
+| `daylight.py` | Blender | Fast CPU ray gate across front, rear, left, right and 3/4 views; fails on any non-glass ray inside the body silhouette hitting background or `rg_inner` / panel backface. |
+| `seams.py` | Blender | Check body-to-body and glass-to-body panel seam pairs for shut-line gap (`1.5–5.0 mm`) and flush step (`<= 2.0 mm`); optional `--with-daylight`. |
 | `rays.py` | Blender | List every surface camera rays pass through, and find double skins. |
-| `seating.py` | Blender | Measure the step between each seated part and its panel all round the part's edge (auto-detecting `rg_seat`). |
+| `seating.py` | Blender | Measure accessory seat steps (`build.json` `seats`, auto-detecting `rg_seat`) and declared body/glass panel seams (`data/seams.json` or `--seam-pair`). |
 | `separation.py` | Blender | Check that parts which come off are their own objects with their pivots and do not overlap. |
 | `annotate.py` | Python | Draw the numbered marks from marks.json on a picture. |
-| `gates.py` | Python | Judge one round's evidence against the gate limits and write one overall result. |
+| `gates.py` | Python | Judge one round's evidence (including daylight leaks, panel seams, and optional Stage 1 macro triage) against the gate limits and write one overall result. |
 | `wait_for.py` | Python | Wait until a file exists and has stopped changing. |
 
 Also here: `kit.py`, what every module's `build(ctx)` receives, the studio presets and the presentation styles; `default_limits.json`, the

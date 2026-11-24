@@ -22,7 +22,25 @@ If `vehicles/` has a note for this vehicle or one built like it, read that too.
   is a separate part behind the panel. Folding one skin into a recess leaves creases and shards, while ending
   the painted return too soon lets the dark duct replace visible painted face below a crease.
 - **A panel gap is geometry.** Build shut lines as a narrow gap of constant width along a curve, with a dark
-  return inside. A drawn or textured line looks painted on.
+  return inside (a backing jamb object, not marked `rg_inner` or `panel=True`, so rays into a legitimate shut
+  line hit dark backing instead of background or a panel's interior backface). A drawn or textured line looks
+  painted on.
+- **HARD RULE: Single shared boundary function.** Every adjacent panel-to-panel or glass-to-body mating pair
+  in `src/body.py` (and across assemblies via `ctx.publish_interface`) MUST derive both mating edges from the
+  **same shared Python boundary function** plus a constant `2–3 mm` shut-line offset, verified by a build-time
+  `assert` before `build(ctx)` returns. Never fit two independent splines for two sides of one seam —
+  independent curves drift apart into wedge gaps, daylight slits, and flush steps. Example pattern:
+  ```python
+  def hatch_front_edge(t):  # shared parametric boundary in mm (same for cpillar_inner_edge(t), etc.)
+      return Vector((x_fn(t), y_fn(t), z_fn(t)))
+
+  # Both mating edges come from hatch_front_edge(t) +/- 1.25 mm tangential offset (2.5 mm shut line)
+  roof_rear_pts = [hatch_front_edge(t) - tangent_out(t) * 1.25 for t in ts]
+  hatch_front_pts = [hatch_front_edge(t) + tangent_out(t) * 1.25 for t in ts]
+  gaps = [(a - b).length for a, b in zip(roof_rear_pts, hatch_front_pts)]
+  assert 1.5 <= min(gaps) and max(gaps) <= 5.0, f"hatch seam gap out of range: {min(gaps):.2f}..{max(gaps):.2f} mm"
+  ```
+  Verify the built scene with `tools/seams.py` and `tools/daylight.py`.
 - **Smooth shading with marked creases.** Shade panels smooth and mark only the real creases sharp. Those marks
   are also what the fairness gate leaves out, so mark them through the kit. Do not patch a curved region with
   flat ad-hoc strips — rebuild it as one fair skin.

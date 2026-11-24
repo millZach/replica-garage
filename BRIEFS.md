@@ -28,6 +28,10 @@ How shape and appearance are decided:
   measurements, then build the mesh on the curve. Strips keep one width. Corners are arcs or clean mitres.
 - Each painted panel is one surface. A repair moves or replaces the old surface and joins edge to edge. Never
   share control points between a recessed cutout/intake and a continuous exterior shoulder sweep.
+- HARD RULE — Single Shared Boundary Function: every adjacent panel-to-panel or glass-to-body mating pair in
+  src/body.py (and across assemblies via ctx.publish_interface) MUST derive both mating edges from the same
+  shared Python boundary function (e.g., hatch_front_edge(t), cpillar_inner_edge(t)) plus a constant 2–3 mm
+  shut-line offset, verified by a build-time assert checking 1.5–5.0 mm gap and <= 2.0 mm flush step.
 - HARD RULE — No visible ripples on the body: absolutely no ripples are allowed to be visible on the body of a
   vehicle. If any ripple appears, find the root cause and address it, note why it happened, and if there is a
   way to improve the skill to prevent it from happening again, propose that improvement in your report.
@@ -51,10 +55,14 @@ Write src/<assembly>.py with build(ctx). Register every object with ctx.add (pas
 cabin, wheelhouse-liner, internal-brake, engine-bay and hidden-underbody objects), mark painted skin as a
 panel, real creases with ctx.crease, any returned edge or inner face with ctx.inner, closed seating edges
 with ctx.seat_edge (vertex group rg_seat), and take every material from ctx.material.
-<Body assembly:> Publish each cut opening's ordered perimeter in mm with ctx.publish_interface(name, points)
-so downstream assemblies seat to the real apertures.
+<Body assembly:> Derive every adjacent panel/glass mating edge from a single shared Python boundary function
+(e.g., hatch_front_edge(t), cpillar_inner_edge(t)) plus a 2–3 mm shut-line offset with a build-time assert
+checking gap (1.5–5.0 mm) and flush step (<= 2.0 mm). Declare adjacent seam pairs in data/seams.json and
+publish each cut opening's ordered perimeter in mm with ctx.publish_interface(name, points) so downstream
+assemblies seat to the real apertures with zero daylight leaks.
 <Downstream assemblies:> Read the accepted body's published openings with ctx.interface(name) as well as
-ctx.body.hit / ctx.body.nearest.
+ctx.body.hit / ctx.body.nearest, and derive mating glass/lamp/bumper edges from those exact shared curves
+with a build-time assert.
 <Level 2 or 3:> These parts come off and are listed in data/parts.json: <list>. Give each its own object,
 registered separable with the pivot written there (ctx.part gives it), and thickness, a returned edge and an
 inner face marked with ctx.inner.
@@ -74,8 +82,9 @@ Feature Ledger item installed on the vehicle.
 How you work:
 - Blender in background mode only, one run at a time. Try your module with
   tools/assemble.py --working <assembly>, which builds out/work-<assembly>.blend. Make your own comparison
-  pictures with tools/render_views.py --trial --view <name>, tools/compare.py and tools/details.py, and check
-  a part that sits on a panel with tools/seating.py --part <name> --on <panel>.
+  pictures with tools/render_views.py --trial --view <name>, tools/compare.py, tools/compare_zones.py and
+  tools/details.py; check accessory seats with tools/seating.py --part <name> --on <panel>, body/glass seams
+  with tools/seams.py --pair A:B, and zero open slits/backfaces with tools/daylight.py.
 - For every assigned Feature Ledger item, render a side-by-side comparison at the reference photo's angle and
   native scale:
   * glazed or transparent openings (bonnets, roofs, lamps, windows): include an offset/parallax view proving
@@ -106,20 +115,55 @@ Report in notes/<assembly>/pass-00.md, with these headings:
 <Common rules>
 
 You are the judge for round <NN>. Judge the frozen candidate in evidence/round-<NN>/ against the references.
-Leave the model and every other file as they are; you write only judge.md and marks.json in that folder.
+Leave the model and every other file as they are; you write ONLY macro-triage.json, judge.md and marks.json
+in that folder.
 
-You have: boards/ (each reference drawing and perspective photo beside a render from the same camera), lit/,
+You have: boards/ (each reference drawing and perspective photo beside a render from the same camera),
+hero-zones.jpg (1:1 side-by-side reference/render contact sheet for the 5 hero zones, when present), lit/,
 clay/, zebra/, orbit/ (all round and from above, in final paint and light), closeups/ (close views covering
-the exterior), details/ (hero exterior, parallax, cabin and sightline views) and gates.json.
+the exterior), details/ (hero exterior, parallax, cabin and sightline views), daylight.json, seams.json,
+and gates.json.
 <extra evidence: for example the exploded view and the close-ups with each panel hidden>
 You have not been told what the builders intended.
 Not built yet, and not a fault this round: <assemblies still to come, or "nothing">.
 Feature Ledger and Small-Details Checklist: data/plan.md.
 Owner choices to protect narrowly (only the exact approved item/finish, not neighbouring surfaces): data/choices.md.
 
-Look at every picture. For each orbit view, hero detail and close-up, open the reference pictures that show
-the same part of the vehicle (refs/sources.json says what each one shows) and compare them side by side at
-matching scale. Look along each edge, adjacent return face and multi-assembly join. Check:
+=== STRICT 2-STAGE "MACRO FIRST" GATE ===
+
+STAGE 1 — 5-SECOND MACRO TRIAGE (5 IMAGES ONLY — DO THIS FIRST):
+Before opening ANY cabin gauges, wheels, decals, interior close-ups or small details, inspect ONLY these
+5 views beside their reference photos: `front`, `rear`, `left`, `front-left`, `rear-right` (plus
+`hero-zones.jpg` if present, and `daylight.json` / `seams.json` in `gates.json`).
+Answer these 4 binary PASS / FAIL checks strictly:
+  1. `lamp_shapes_angles`: Lamp shapes/angles match reference?
+  2. `zero_daylight_leaks`: Zero open gaps/daylight leaks between panels or glass?
+  3. `smooth_roofline_greenhouse`: Smooth continuous roofline/greenhouse with zero steps?
+  4. `flush_panel_alignment`: Flush panel-to-panel alignment?
+
+Write `evidence/round-<NN>/macro-triage.json` in the contract format:
+  {
+    "views": ["front", "rear", "left", "front-left", "rear-right"],
+    "checks": {
+      "lamp_shapes_angles": {"passed": true|false, "note": "..."},
+      "zero_daylight_leaks": {"passed": true|false, "note": "..."},
+      "smooth_roofline_greenhouse": {"passed": true|false, "note": "..."},
+      "flush_panel_alignment": {"passed": true|false, "note": "..."}
+    },
+    "passed": true|false,
+    "score_cap": null | 55
+  }
+
+HARD STOP RULE: If ANY of the 4 Stage 1 checks is FAIL:
+- Set `"passed": false` and `"score_cap": 55` in `macro-triage.json`.
+- STOP before Stage 2: do NOT inspect or grade cabin gauges, wheels, decals, stitching or small details.
+- Record ONLY the Stage 1 macro blocking faults (and their boxes in `marks.json`), cap EVERY assembly score
+  at <= 55/100 until all 4 Stage 1 checks pass, and mark Stage 2 as BLOCKED BY STAGE 1.
+
+STAGE 2 — DETAILED INSPECTION (ONLY WHEN ALL 4 STAGE 1 CHECKS PASS):
+Look at every picture. For each orbit view, hero zone, hero detail and close-up, open the reference pictures
+that show the same part of the vehicle (refs/sources.json says what each one shows) and compare them side by
+side at matching scale. Look along each edge, adjacent return face and multi-assembly join. Check:
 - **Shape and section proportions:** measure key widths, gaps and cross-sections in native pixels across two
   angles where possible (not just outer silhouette).
 - **Depth, arrangement and operating state:** verify part counts, grouping/order, overlap, recess depth and
@@ -133,14 +177,19 @@ matching scale. Look along each edge, adjacent return face and multi-assembly jo
 plausible, complete and cleanly built, not for matching a photo.">
 
 judge.md holds:
-1. Faults, worst first, at most fifteen. For each: its number; the picture it shows in; what the reference
-   shows; what the model shows; which assembly it belongs to (<the assemblies in the build list being judged>);
-   BLOCKING (anyone would see it is wrong: any visible ripple on the body is an automatic BLOCKING fault; also
-   a hole, a double skin, a part poking through, a wiggly edge, a wrong option/depth/arrangement, an occluded
-   control/gauge, a missing opening, a cheap/flat finish or wrong proportion) or MINOR.
-   Write each fault's place to marks.json, in the pixels of its picture, in the contract's format.
-2. Small-Details Checklist audit: pass/open for every listed item.
-3. A score out of 100 for each assembly, with one line on why. Scores are kept only to show the trend.
+0. Stage 1 Macro Triage table (all 4 binary PASS/FAIL checks with one-line evidence, overall Stage 1 verdict,
+   and whether Stage 2 ran or was BLOCKED with score cap 55/100).
+1. Faults, worst first, at most fifteen (macro faults only when Stage 1 failed). For each: its number; the
+   picture it shows in; what the reference shows; what the model shows; which assembly it belongs to
+   (<the assemblies in the build list being judged>); BLOCKING (anyone would see it is wrong: any failed
+   Stage 1 macro check or any visible ripple on the body is an automatic BLOCKING fault; also a hole, a
+   daylight leak, a seam gap/flush miss, a double skin, a part poking through, a wiggly edge, a wrong
+   option/depth/arrangement, an occluded control/gauge, a missing opening, a cheap/flat finish or wrong
+   proportion) or MINOR. Write each fault's place to marks.json, in the pixels of its picture, in the
+   contract's format.
+2. Small-Details Checklist audit: pass/open for every listed item (or "BLOCKED BY STAGE 1" when Stage 1 fails).
+3. A score out of 100 for each assembly (capped at <= 55 whenever any Stage 1 check fails), with one line on
+   why. Scores are kept only to show the trend.
 4. Which earlier faults and owner marks are gone and which remain. Earlier faults: <the previous round's
    judge.md, and the user-marks.md of the last stop; or "none">. A fault or owner mark is gone only when its
    original locked camera and box show it gone, and neighbouring views show no regression.
@@ -210,10 +259,14 @@ Noticed and not touched.
 Check the proof pictures and numbers yourself. To accept pass NN, run:
 
 ```
-python tools/accept.py <assembly> <NN> --project <path> --depends-on <list> --seats <seats.json>
+python tools/accept.py <assembly> <NN> --project <path> --depends-on <list> --seats <seats.json> --round evidence/round-<RR>
 ```
 
-(`--also-build data/build-workshop.json` at level 3). It copies `src/<assembly>.py` to
+(`--also-build data/build-workshop.json` at level 3; `--seams <seams.json>` to attach panel seam pairs to the
+build list). Passing `--round evidence/round-<RR>` enforces the strict 2-stage "Macro First" gate: if
+`macro-triage.json` failed any of the 4 Stage 1 binary checks, `accept.py` refuses detail/non-macro assemblies
+(cabin, hardware, wheels, decals, underbody) with exit code 1 until Stage 1 passes, while still allowing macro
+fix passes (`body`, `front`, `rear`, `glass`, or `--macro-fix`). It copies `src/<assembly>.py` to
 `accepted/<assembly>/NN/`, writes its SHA-256 `manifest.json`, and updates every build list that names the
 assembly. `assemble.py` builds only from `accepted/`, so work nobody accepted cannot reach the vehicle. To
 return a pass, write the next note; no version is made for the one returned.

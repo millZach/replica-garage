@@ -194,6 +194,8 @@ def build(d, name='build.json'):
         _num(e['version'], where + ': version')
         for j, s in enumerate(_list(e['seats'], where + ': seats')):
             _need(s, ('part', 'on'), '%s seat %d' % (where, j + 1))
+        if 'seams' in e and e['seams'] is not None:
+            seams(e['seams'], '%s: seams' % where)
     return d
 
 
@@ -279,4 +281,104 @@ def details(d, name='details.json'):
                 _vec(v, 3, '%s: targets_mm.%s' % (where, k))
     if not d:
         raise BadInput('%s has no views' % name)
+    return d
+
+
+SEAM_KINDS = ('body', 'glass')
+MACRO_TRIAGE_VIEWS = ('front', 'rear', 'left', 'front-left', 'rear-right')
+MACRO_TRIAGE_CHECKS = (
+    'lamp_shapes_angles',
+    'zero_daylight_leaks',
+    'smooth_roofline_greenhouse',
+    'flush_panel_alignment',
+)
+MACRO_SCORE_CAP = 55
+
+
+def seams(d, name='seams.json'):
+    if isinstance(d, list):
+        cfg = {'pairs': d}
+    elif isinstance(d, dict):
+        _need(d, ('pairs',), name)
+        cfg = dict(d)
+    else:
+        raise BadInput('%s must be a list of {"a", "b"} pairs or {"pairs": [...]}' % name)
+    for k in ('min_gap_mm', 'max_gap_mm', 'max_flush_mm', 'search_radius_mm'):
+        if k in cfg and cfg[k] is not None:
+            _num(cfg[k], '%s: %s' % (name, k))
+    if 'min_gap_mm' in cfg and 'max_gap_mm' in cfg and cfg['min_gap_mm'] is not None and cfg['max_gap_mm'] is not None:
+        if float(cfg['max_gap_mm']) <= float(cfg['min_gap_mm']):
+            raise BadInput('%s: max_gap_mm must exceed min_gap_mm' % name)
+    pairs = _list(cfg['pairs'], name + ': pairs')
+    for i, p in enumerate(pairs):
+        where = '%s pair %d' % (name, i + 1)
+        _need(p, ('a', 'b'), where)
+        if not isinstance(p['a'], str) or not p['a'].strip() or not isinstance(p['b'], str) or not p['b'].strip():
+            raise BadInput('%s: "a" and "b" must be non-empty part names' % where)
+        if p['a'].strip() == p['b'].strip():
+            raise BadInput('%s: a seam pair cannot compare %r to itself' % (where, p['a']))
+        if 'kind' in p and p['kind'] is not None and p['kind'] not in SEAM_KINDS:
+            raise BadInput('%s: kind must be one of %s' % (where, ', '.join(SEAM_KINDS)))
+        for k in ('min_gap_mm', 'max_gap_mm', 'max_flush_mm', 'search_radius_mm'):
+            if k in p and p[k] is not None:
+                _num(p[k], '%s: %s' % (where, k))
+    return cfg
+
+
+def zones(d, name='zones.json'):
+    items = d.get('zones') if isinstance(d, dict) else d
+    items = _list(items, name)
+    if not items:
+        raise BadInput('%s has no zones' % name)
+    seen = set()
+    for i, z in enumerate(items):
+        where = '%s entry %d' % (name, i + 1)
+        _need(z, ('id',), where)
+        zid = str(z['id']).strip()
+        if not zid:
+            raise BadInput('%s: id must be non-empty' % where)
+        where = '%s zone %r' % (name, zid)
+        if zid in seen:
+            raise BadInput('%s is listed twice' % where)
+        seen.add(zid)
+        if ('ref' in z) != ('render' in z):
+            raise BadInput('%s: "ref" and "render" must be given together' % where)
+        for bk in ('box_px', 'box_norm', 'box_img_norm'):
+            if bk in z and z[bk] is not None:
+                b = _vec(z[bk], 4, '%s: %s' % (where, bk))
+                if b[2] <= b[0] or b[3] <= b[1]:
+                    raise BadInput('%s: %s must have x1 > x0 and y1 > y0' % (where, bk))
+    return items
+
+
+def macro_triage(d, name='macro-triage.json'):
+    _need(d, ('views', 'checks', 'passed'), name)
+    views = _list(d['views'], name + ': views')
+    vset = {str(v) for v in views}
+    missing_views = [v for v in MACRO_TRIAGE_VIEWS if v not in vset]
+    if missing_views:
+        raise BadInput('%s: Stage 1 views missing required view(s): %s' % (name, ', '.join(missing_views)))
+    checks = d['checks']
+    if not isinstance(checks, dict):
+        raise BadInput('%s: "checks" must be a JSON object' % name)
+    results = {}
+    for k in MACRO_TRIAGE_CHECKS:
+        if k not in checks:
+            raise BadInput('%s: missing check %r' % (name, k))
+        v = checks[k]
+        if isinstance(v, bool):
+            results[k] = v
+        elif isinstance(v, dict) and isinstance(v.get('passed'), bool):
+            results[k] = v['passed']
+        else:
+            raise BadInput('%s: check %r must be a boolean or {"passed": bool}' % (name, k))
+    if not isinstance(d['passed'], bool):
+        raise BadInput('%s: "passed" must be a boolean' % name)
+    expected = all(results.values())
+    if d['passed'] != expected:
+        raise BadInput('%s: "passed" is %s but the 4 binary checks evaluate to %s' % (name, d['passed'], expected))
+    if not expected and d.get('score_cap') is not None:
+        cap = _num(d['score_cap'], name + ': score_cap')
+        if cap > MACRO_SCORE_CAP:
+            raise BadInput('%s: score_cap on a Stage 1 fail must be <= %d, got %g' % (name, MACRO_SCORE_CAP, cap))
     return d

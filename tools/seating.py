@@ -1,17 +1,22 @@
-"""Measure how parts sit on their panels: the signed step all round each part's edge.  (runs in Blender)
+"""Measure how parts sit on their panels and how adjacent body/glass panels meet at seams. (Blender)
 
 usage: blender -b <scene.blend> --python tools/seating.py -- --out DIR [--project DIR] [--build FILE]
-       [--part NAME --on PANEL] [--points 72] [--max-step-mm 3] [--edge-group GROUP] [--all-loops]
+       [--seams FILE] [--part NAME --on PANEL] [--seam-pair A:B] [--points 72] [--max-step-mm 3]
+       [--min-gap-mm 1.5] [--max-gap-mm 5.0] [--max-flush-mm 2.0] [--search-radius-mm 40]
+       [--edge-group GROUP] [--all-loops]
 
-Seats come from build.json (default <project>/data/build.json): every {"part", "on"} in every assembly's "seats".
---part <name> --on <panel> measures one part instead (a builder on its own trial assembly). Names are the ones
-the builders registered (ctx.add part=...), or object names. A part's edge is its open border (edges with one
-face), the longest loop unless --all-loops; a part with no open border needs --edge-group, a vertex group naming
-its edge. --points points are spaced evenly along the edge; at each, the nearest point on the panel is found and
-the step is the distance along the panel's normal there: + when the part stands proud, - when it is sunk (panel
-normals point outward). The gap across the panel's surface is reported too.
-Writes <out>/seating.json. Exit 1 when any step is more than --max-step-mm either way, or a part or panel listed
-in build.json is not in the scene; 2 on bad input.
+Checks two kinds of joints:
+  1. Accessory / insert seats from build.json (every {"part", "on"} in every assembly's "seats"), or
+     --part <name> --on <panel>. At --points evenly spaced points along the part's open border (or
+     vertex group rg_seat / --edge-group), measures the signed step along the panel's normal (+ proud,
+     - sunk) within --max-step-mm (default 3 mm).
+  2. Body-to-body & glass-to-body panel seams from data/seams.json (--seams FILE), build.json
+     ("seams" lists), or --seam-pair A:B (e.g. hood:bumper, hatch_glass:hatch, quarter:rear_bumper).
+     Measures each declared pair via seams.py: gap must stay in [--min-gap-mm, --max-gap-mm] (default
+     1.5 to 5.0 mm) and flush step within --max-flush-mm (default 2.0 mm).
+
+Writes <out>/seating.json (with both "seats" and "seams"). Exit 1 when any seat or seam fails, or a
+declared part/panel is missing from the scene; 2 on bad input.
 """
 import os
 import sys
@@ -23,10 +28,11 @@ from mathutils.bvhtree import BVHTree
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _blender as B  # noqa: E402
 import _formats as F  # noqa: E402
+import seams as S  # noqa: E402
 from _common import ArgParser, BadInput, EXIT_GATE, EXIT_OK, load_json, save_json  # noqa: E402
 
 USAGE = ('blender -b <scene.blend> --python tools/seating.py -- --out DIR [--project DIR] [--build FILE] '
-         '[--part NAME --on PANEL] [--max-step-mm 3]')
+         '[--seams FILE] [--part NAME --on PANEL] [--seam-pair A:B] [--max-step-mm 3]')
 
 
 def loops(edges):
@@ -144,10 +150,16 @@ def main(argv):
     ap = ArgParser(usage_line=USAGE)
     ap.add_argument('--out', required=True)
     ap.add_argument('--build')
+    ap.add_argument('--seams')
     ap.add_argument('--part')
     ap.add_argument('--on')
+    ap.add_argument('--seam-pair', action='append', default=[])
     ap.add_argument('--points', type=int, default=72)
     ap.add_argument('--max-step-mm', type=float, default=3.0)
+    ap.add_argument('--min-gap-mm', type=float, default=S.DEFAULT_MIN_GAP_MM)
+    ap.add_argument('--max-gap-mm', type=float, default=S.DEFAULT_MAX_GAP_MM)
+    ap.add_argument('--max-flush-mm', type=float, default=S.DEFAULT_MAX_FLUSH_MM)
+    ap.add_argument('--search-radius-mm', type=float, default=S.DEFAULT_SEARCH_RADIUS_MM)
     ap.add_argument('--edge-group')
     ap.add_argument('--all-loops', action='store_true')
     B.add_project_arg(ap)
@@ -156,26 +168,53 @@ def main(argv):
         raise BadInput('--points must be at least 4')
     if bool(a.part) != bool(a.on):
         raise BadInput('--part and --on go together')
+    if a.min_gap_mm < 0 or a.max_gap_mm <= a.min_gap_mm or a.max_flush_mm <= 0 or a.search_radius_mm <= 0:
+        raise BadInput('invalid seam gap/flush/search-radius limits')
+
+    project = B.project_dir(a)
+    pairs = []
+    seam_pairs = []
     if a.part:
         if not B.part_objects(a.part):
             raise BadInput('part %r is not in the scene' % a.part)
         if not B.part_objects(a.on):
             raise BadInput('panel %r is not in the scene' % a.on)
         pairs = [(a.part, a.on)]
-    else:
-        build = F.build(load_json(a.build or os.path.join(B.project_dir(a), 'data', 'build.json'), 'build list'))
-        pairs = []
-        for e in build:
-            for st in e['seats']:
-                pairs.append((str(st['part']), str(st['on'])))
+    if a.seam_pair:
+        seam_pairs = S.load_seam_pairs(
+            project, cli_pairs=a.seam_pair,
+            default_min_gap=a.min_gap_mm, default_max_gap=a.max_gap_mm,
+            default_max_flush=a.max_flush_mm, default_search_radius=a.search_radius_mm,
+        )
+    if not a.part and not a.seam_pair:
+        build_path = a.build or os.path.join(project, 'data', 'build.json')
+        if os.path.isfile(build_path) or a.build or not a.seams:
+            build = F.build(load_json(build_path, 'build list'))
+            for e in build:
+                for st in e['seats']:
+                    pairs.append((str(st['part']), str(st['on'])))
+        seam_pairs = S.load_seam_pairs(
+            project, seams_file=a.seams, build_file=a.build,
+            default_min_gap=a.min_gap_mm, default_max_gap=a.max_gap_mm,
+            default_max_flush=a.max_flush_mm, default_search_radius=a.search_radius_mm,
+        )
+    elif a.seams:
+        seam_pairs.extend(S.load_seam_pairs(
+            project, seams_file=a.seams, build_file=None,
+            default_min_gap=a.min_gap_mm, default_max_gap=a.max_gap_mm,
+            default_max_flush=a.max_flush_mm, default_search_radius=a.search_radius_mm,
+        ))
+
     u = B.mm_per_unit()
     rows = [seat(p, o, a, u) for p, o in pairs]
     for r in rows:
         print('SEAT %-24s on %-20s %s  %s' % (r['part'], r['on'], r.get('note') or 'step %+.2f to %+.2f mm' % (
             r['min_step_mm'], r['max_step_mm']), 'pass' if r['passed'] else 'FAIL'))
+    seam_rows = S.evaluate_pairs(seam_pairs, n_points=a.points) if seam_pairs else []
     steps = [r['max_abs_step_mm'] for r in rows if r['max_abs_step_mm'] is not None]
-    ok = all(r['passed'] for r in rows)
-    res = dict(seats=rows, max_abs_step_mm=max(steps) if steps else None, limit_mm=a.max_step_mm,
+    ok = all(r['passed'] for r in rows) and all(r['passed'] for r in seam_rows)
+    res = dict(seats=rows, seams=seam_rows, max_abs_step_mm=max(steps) if steps else None, limit_mm=a.max_step_mm,
+               seam_limits=dict(min_gap_mm=a.min_gap_mm, max_gap_mm=a.max_gap_mm, max_flush_mm=a.max_flush_mm),
                sign='+ part proud of the panel, - part sunk', passed=bool(ok))
     save_json(os.path.join(a.out, 'seating.json'), res)
     return EXIT_OK if ok else EXIT_GATE

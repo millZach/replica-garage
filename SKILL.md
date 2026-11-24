@@ -35,6 +35,13 @@ Read on demand:
   outline match.
 - **One skin.** Each painted panel is a single surface. A repair moves or replaces the old surface and joins
   edge to edge.
+- **HARD RULE: Single Shared Boundary Function.** Every adjacent panel-to-panel or glass-to-body mating pair
+  in `src/body.py` (and across assemblies via `ctx.publish_interface`) MUST derive both mating edges from the
+  **same shared Python boundary function** (for example `hatch_front_edge(t)` and `cpillar_inner_edge(t)`)
+  plus a constant `2–3 mm` shut-line offset — never two independently fitted splines or hand-edited coordinate
+  lists. Every mating pair MUST run a build-time `assert` verifying that its generated edge vertices stay
+  within `1.5–5.0 mm` gap and `<= 2.0 mm` flush step before `build(ctx)` returns, and declare the pair in
+  `data/seams.json` so `seams.py` / `seating.py` verify the evaluated scene.
 - **HARD RULE: No visible ripples on the body.** Absolutely no ripples are allowed to be visible on the body of
   a vehicle. If any ripple appears, find the root cause and address it, note why it happened (in `data/log.md`
   and the pass report), and if there is a way to improve this skill to prevent it from happening again, propose
@@ -137,7 +144,9 @@ Done when: those files are written and `data/state.json` is updated.
 Brief one builder per assembly from [BRIEFS.md](BRIEFS.md), body first, since other parts ask the body where
 its surface and cut apertures are (`ctx.body` and `ctx.interface`):
 
-- **Body:** the painted shell, fenders, arches, shut lines, openings (publishing aperture loops with
+- **Body:** the painted shell, fenders, arches, shut lines, openings (deriving every adjacent panel/glass
+  mating edge from a single shared Python boundary function plus `2–3 mm` shut-line offset with a build-time
+  `assert`, declaring body/glass seam pairs in `data/seams.json`, and publishing aperture loops with
   `ctx.publish_interface`).
 - **Front and rear ends:** lamps, grilles, ducts, the dark parts of the bumpers, lower aero, badges/plates.
 - **Hardware:** wheels, tyres, brakes, mirrors, wipers, spoilers and anything bolted on (marking internal
@@ -172,22 +181,40 @@ has its own baseline and its own three fix rounds.
    clay and zebra (use `--resume` if interrupted), `orbit.py` and `closeups.py` under the proof look (pass
    `--poses-from` pointing at the baseline round's `orbit.json` / `closeups.json` from the second round onward
    so cameras stay pixel-locked), and `details.py` for the Feature Ledger and cabin views. Then run
-   `compare.py`, `dimensions.py`, `fairness.py`, `seating.py`, `rays.py --grid`, and for levels 2 and 3
-   `separation.py`. Run `gates.py` last.
-2. **Judge.** Start a fresh judge with the judge brief. Tell it which assemblies are not built yet and point
-   it to `data/plan.md`'s Feature Ledger and Small-Details Checklist. It returns `judge.md` and `marks.json`:
-   ranked **marked faults** (blocking or minor), a checklist status for small details, and a score per
-   assembly. Run `annotate.py` to draw the marks.
+   `compare.py`, `compare_zones.py` (building the 1:1 Hero Zone Comparison Sheet `<round>/hero-zones.jpg` for
+   front headlamps & nose, rear hatch glass & tail lamps, roofline/B-pillar/quarter window, rear
+   quarter-to-bumper seam, and full side profile, configurable via `data/zones.json`), `dimensions.py`,
+   `fairness.py`, `seating.py`, `seams.py` (for body-to-body & glass-to-body seam gaps/flush), `daylight.py`
+   (fast CPU daylight-leak ray gate across `front`, `rear`, `left`, `right`, and `3/4` views), `rays.py --grid`,
+   and for levels 2 and 3 `separation.py`. Run `gates.py` last.
+2. **Judge (Strict 2-Stage "Macro First" Gate).** Start a fresh judge with the judge brief. Tell it which
+   assemblies are not built yet and point it to `data/plan.md`'s Feature Ledger and Small-Details Checklist.
+   - **Stage 1 (5-second macro triage — 5 images only):** Before inspecting cabin gauges, wheels, decals, or
+     close-ups, the judge looks ONLY at `front`, `rear`, `left`, `front-left`, `rear-right` beside the
+     reference photos (plus `hero-zones.jpg`) and records 4 binary PASS/FAIL checks in `macro-triage.json` and
+     at the top of `judge.md`:
+     1. Lamp shapes/angles match reference?
+     2. Zero open gaps/daylight leaks between panels or glass?
+     3. Smooth continuous roofline/greenhouse with zero steps?
+     4. Flush panel-to-panel alignment?
+   - **Any FAIL blocks Stage 2 detail work** and caps assembly scores (`<= 55/100`) until fixed. When Stage 1
+     fails, do NOT brief or accept cabin/wheel/decal/detail passes — fix the macro faults first (`accept.py
+     --round evidence/round-NN` enforces this block automatically).
+   - **Stage 2 (only when all 4 Stage 1 checks PASS):** Full inspection of close-ups, Feature Ledger, cabin,
+     wheels, decals and Small-Details Checklist. It returns `macro-triage.json`, `judge.md` and `marks.json`:
+     ranked **marked faults** (blocking or minor), a checklist status for small details, and a score per
+     assembly. Run `annotate.py` to draw the marks.
 3. **The first round of the loop is the baseline.** Later rounds are measured against it. Faults the user
    marked at the last stop go into every round's brief until cleared in their original locked camera and box,
    ahead of the judge's faults — **merged with** (not replacing) top blocking judge faults so major misses do
    not stall across rounds.
 4. **Fix.** Write one fix note per assembly, each on one marked area, worst blocking faults first (batching
-   quick Small-Details Checklist items onto the owning assembly so they are not starved). Assemblies work in
+   quick Small-Details Checklist items onto the owning assembly once Stage 1 passes). Assemblies work in
    parallel. Send the note to the builder that owns the assembly if it can be continued; otherwise start a
    fresh one with the common rules, the note and its earlier passes. Ask for the cause before the fix when a
    fault looks like a symptom. Check each pass against its reference / before / after proof and regression
-   view, then freeze it with `tools/accept.py` (updating every build list that names it), or return it.
+   view, then freeze it with `tools/accept.py --round evidence/round-NN` (updating every build list that names
+   it, and enforcing the Stage 1 macro block on detail assemblies), or return it.
 5. **Rebuild** with `assemble.py`, update `data/state.json`, and go to 1.
 
 Run at most three fix rounds after the baseline. Stop sooner when every gate passes, the Small-Details

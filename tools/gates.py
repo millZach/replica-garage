@@ -3,21 +3,28 @@
 usage: python tools/gates.py <evidence/round-NN> [--limits FILE] [--skip gate,gate]
 
 Reads the tools' results anywhere in the round folder: cameras.json (else <project>/data/cameras.json),
-dimensions.json, outline.json, fairness.json, seating*.json, rays*.json, separation.json. Limits: the defaults in
-tools/default_limits.json, overlaid by --limits or <project>/data/limits.json; every limit that differs from its
-default is printed and recorded. Each value is judged here against those limits; a tool's own pass flag is not
-used.
+dimensions.json, outline.json, fairness.json, seating*.json, seams*.json, daylight*.json, rays*.json,
+separation.json, and (when judged) macro-triage.json. Limits: the defaults in tools/default_limits.json,
+overlaid by --limits or <project>/data/limits.json; every limit that differs from its default is printed
+and recorded. Each value is judged here against those limits; a tool's own pass flag is not used.
 
 Gates (limit names as in default_limits.json):
   cameras      at least min_precise_views views whose RMS is within camera_rms_mm (and not flat)
   dimensions   each maker's dimension within dimension_error_mm (estimated ones are left out)
   outline      each precise view: median within outline_median_px and 95th percentile within outline_p95_px,
                at outline_ref_width_px image width
-  fairness     each panel: 99th percentile within fairness_p99_deg, maximum within fairness_max_deg
+  fairness     each panel: 99th percentile within fairness_p99_deg, maximum within fairness_max_deg,
+               waviness within fairness_wave_mm
   seating      each seated part: step within seating_step_mm all round its edge
+  seams        each declared body-to-body or glass-to-body seam pair: gap within [seam_gap_min_mm,
+               seam_gap_max_mm] (1.5-5.0 mm) and flush step within seam_flush_mm (2.0 mm). Needed when
+               data/seams.json exists or build.json declares seams.
+  daylight     non-glass rays inside the car's body silhouette hitting background or rg_inner / panel
+               backface: at most daylight_leak_count (0)
   double_skin  painted surfaces within the stack depth behind another: at most double_skin_count
   separation   each part its own object with its pivot; overlap within separation_overlap_mm. Needed only when
                the project has data/parts.json.
+  macro_triage optional Stage 1 Blind Judge binary triage (macro-triage.json); judged when present.
 A needed gate with no evidence in the round is missing and fails the round unless skipped with --skip.
 Writes <round>/gates.json: every gate with its value, its limit and pass or fail, the overall result and the
 changed limits. Exit 0 when every gate passes, 1 when any fails or is missing, 2 on bad input.
@@ -32,7 +39,8 @@ from _common import (ArgParser, BadInput, DEFAULT_LIMITS, EXIT_GATE, EXIT_OK, TO
                      project_limits, read_limits, run, save_json)
 
 USAGE = 'python tools/gates.py <evidence/round-NN> [--limits FILE] [--skip gate,gate]'
-GATES = ('cameras', 'dimensions', 'outline', 'fairness', 'seating', 'double_skin', 'separation')
+GATES = ('cameras', 'dimensions', 'outline', 'fairness', 'seating', 'seams', 'daylight', 'double_skin',
+         'separation', 'macro_triage')
 
 
 def find(root, pred):
@@ -127,6 +135,25 @@ def collect(rnd, project, L):
     seat_files = find(rnd, lambda n: n.startswith('seating'))
     seat_files.sort(key=lambda path: os.path.dirname(path) != rnd)
     seen_seats = set()
+    seen_seams = set()
+
+    def add_seam_pair(s, src_path):
+        if not isinstance(s, dict) or not s.get('a') or not s.get('b'):
+            bad(src_path, 'each seam pair needs "a" and "b"')
+        label = s.get('name') or ('%s <-> %s' % (s['a'], s['b']))
+        mn, mx, fl = num(s.get('min_gap_mm')), num(s.get('max_gap_mm')), num(s.get('max_abs_flush_mm'))
+        key = (s['a'], s['b'], mn, mx, fl)
+        if key in seen_seams:
+            return
+        seen_seams.add(key)
+        if mn is None or mx is None or fl is None:
+            add('seams', label, None, [L['seam_gap_min_mm'], L['seam_gap_max_mm']], False, src_path,
+                unit='mm', note=s.get('note', 'not measured'))
+            return
+        add('seams', label + ' min gap', mn, L['seam_gap_min_mm'], mn >= L['seam_gap_min_mm'], src_path, unit='mm')
+        add('seams', label + ' max gap', mx, L['seam_gap_max_mm'], mx <= L['seam_gap_max_mm'], src_path, unit='mm')
+        add('seams', label + ' flush', fl, L['seam_flush_mm'], fl <= L['seam_flush_mm'], src_path, unit='mm')
+
     for p in seat_files:
         d = load_json(p)
         seats = d if isinstance(d, list) else d.get('seats')
@@ -143,6 +170,31 @@ def collect(rnd, project, L):
             add('seating', '%s on %s' % (s.get('part'), s.get('on')), m, L['seating_step_mm'],
                 m is not None and m <= L['seating_step_mm'], p, unit='mm',
                 **({} if m is not None else {'note': s.get('note', 'not measured')}))
+        if isinstance(d, dict) and isinstance(d.get('seams'), list):
+            for sm in d['seams']:
+                add_seam_pair(sm, p)
+
+    seam_files = find(rnd, lambda n: n.startswith('seams'))
+    seam_files.sort(key=lambda path: os.path.dirname(path) != rnd)
+    for p in seam_files:
+        d = load_json(p)
+        pairs = d if isinstance(d, list) else d.get('pairs')
+        if not isinstance(pairs, list):
+            bad(p, 'no "pairs" list')
+        for sm in pairs:
+            add_seam_pair(sm, p)
+
+    for p in find(rnd, lambda n: n.startswith('daylight')):
+        d = load_json(p)
+        if 'total_leaks' not in d or d.get('total_leaks') is None:
+            bad(p, 'no "total_leaks" count')
+        n = int(d['total_leaks'])
+        add('daylight', os.path.relpath(p, rnd).replace(os.sep, '/'), n, L['daylight_leak_count'],
+            n <= L['daylight_leak_count'], p, unit='leaks',
+            background_leaks=int(d.get('background_leaks', 0)),
+            wedge_leaks=int(d.get('wedge_leaks', 0)),
+            inner_leaks=int(d.get('inner_leaks', 0)),
+            backface_leaks=int(d.get('backface_leaks', 0)))
 
     for p in find(rnd, lambda n: n.startswith('rays')):
         d = load_json(p)
@@ -167,7 +219,28 @@ def collect(rnd, project, L):
         worst = max([float(o['depth_mm']) for o in d['overlaps']] or [0.0])
         add('separation', 'level %s worst overlap' % d.get('level'), worst, L['separation_overlap_mm'],
             worst <= L['separation_overlap_mm'], p, unit='mm')
+
+    for p in find(rnd, lambda n: n == 'macro-triage.json')[:1]:
+        t = F.macro_triage(load_json(p), os.path.relpath(p, project))
+        for k in F.MACRO_TRIAGE_CHECKS:
+            v = t['checks'][k]
+            ok_chk = v if isinstance(v, bool) else v['passed']
+            add('macro_triage', k, bool(ok_chk), True, bool(ok_chk), p)
     return rows
+
+
+def _project_has_seams(project):
+    if os.path.isfile(os.path.join(project, 'data', 'seams.json')):
+        return True
+    bp = os.path.join(project, 'data', 'build.json')
+    if os.path.isfile(bp):
+        try:
+            b = load_json(bp, 'build.json')
+            if isinstance(b, list) and any(isinstance(e, dict) and e.get('seams') for e in b):
+                return True
+        except BadInput:
+            pass
+    return False
 
 
 def main(argv):
@@ -198,8 +271,12 @@ def main(argv):
     for r in rows:
         if isinstance(r['measured'], float) and not math.isfinite(r['measured']):
             r['measured'] = None
+    has_seams = _project_has_seams(project)
+    has_parts = os.path.isfile(os.path.join(project, 'data', 'parts.json'))
     needed = [g for g in GATES if g not in skip and
-              (g != 'separation' or os.path.isfile(os.path.join(project, 'data', 'parts.json')))]
+              (g != 'separation' or has_parts) and
+              (g != 'seams' or has_seams) and
+              (g != 'macro_triage')]
     missing = [g for g in needed if not any(r['gate'] == g and r['counted'] for r in rows)]
     counted = [r for r in rows if r['counted']]
     ok = all(r['passed'] for r in counted) and not missing

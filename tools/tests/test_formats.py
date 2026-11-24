@@ -65,7 +65,7 @@ def test_gates_count_a_part_not_built_as_information(project):
     write_json(project / 'data' / 'parts.json', [PART])
     write_json(rnd / 'separation.json', {'level': 3, 'overlaps': [], 'parts': [
         {'part': 'door_l', 'status': 'not built', 'own_object': None, 'pivot_ok': None}]})
-    r = run_tool('gates.py', rnd, '--skip', 'cameras,dimensions,outline,fairness,seating,double_skin')
+    r = run_tool('gates.py', rnd, '--skip', 'cameras,dimensions,outline,fairness,seating,daylight,double_skin')
     assert r.returncode == 0, r.stdout + r.stderr
     assert read_json(rnd / 'gates.json')['summary']['separation'] == 'pass'
 

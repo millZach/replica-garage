@@ -234,4 +234,73 @@ register(ctx, 'front', lamp, 'lens', part='lamp_closed')
 top_verts = [v.index for v in lamp.data.vertices if v.co.z > 0.0]
 ctx.seat_edge(lamp, top_verts)
 save('seat_closed')
+
+
+# daylight_ok: closed box shell with a glass rear window (valid glass ray through it) -> 0 leaks
+ctx = empty_scene()
+# Build a hollow box with a recessed rear window pane covered cleanly by glass
+b_ok = box('body_closed', -0.9, 3.3, -0.9, 0.9, 0.15, 1.3)
+register(ctx, 'body', b_ok, 'body', part='body_shell', panel=True)
+glass_pane = mesh_object('rear_glass', [(3.302, -0.4, 0.7), (3.302, 0.4, 0.7), (3.302, 0.4, 1.15),
+                                        (3.302, -0.4, 1.15)], [(0, 1, 2, 3)])
+glass_pane['rg_glass'] = True
+register(ctx, 'glass', glass_pane, 'glass', part='hatch_glass')
+save('daylight_ok')
+
+# daylight_slit: a rear wall with a 25 mm horizontal tail-lamp slit open all the way through to background
+ctx = empty_scene()
+# Four outer strips around an open central slit at x=3.3, y in [-0.5, 0.5], z in [0.65, 0.72]
+# Top, bottom, left, right strips forming a rear bulkhead frame facing +X (outward)
+def quad_x(name, x, y0, y1, z0, z1, flip=False):
+    v = [(x, y0, z0), (x, y1, z0), (x, y1, z1), (x, y0, z1)]
+    f = [(0, 3, 2, 1)] if flip else [(0, 1, 2, 3)]
+    return mesh_object(name, v, f)
+
+register(ctx, 'body', quad_x('rear_upper', 3.3, -0.9, 0.9, 0.74, 1.30), 'body', part='rear_upper', panel=True)
+register(ctx, 'body', quad_x('rear_lower', 3.3, -0.9, 0.9, 0.15, 0.64), 'body', part='rear_lower', panel=True)
+register(ctx, 'body', quad_x('rear_left', 3.3, -0.9, -0.5, 0.64, 0.74), 'body', part='rear_left', panel=True)
+register(ctx, 'body', quad_x('rear_right', 3.3, 0.5, 0.9, 0.64, 0.74), 'body', part='rear_right', panel=True)
+save('daylight_slit')
+
+# daylight_inner: a front wall where an inner backing face marked ctx.inner is exposed through an opening
+ctx = empty_scene()
+register(ctx, 'body', quad_x('front_upper', -0.9, -0.9, 0.9, 0.80, 1.30, flip=True), 'body', part='front_upper', panel=True)
+register(ctx, 'body', quad_x('front_lower', -0.9, -0.9, 0.9, 0.15, 0.60, flip=True), 'body', part='front_lower', panel=True)
+register(ctx, 'body', quad_x('front_left', -0.9, -0.9, -0.5, 0.60, 0.80, flip=True), 'body', part='front_left', panel=True)
+register(ctx, 'body', quad_x('front_right', -0.9, 0.5, 0.9, 0.60, 0.80, flip=True), 'body', part='front_right', panel=True)
+inner_ob = quad_x('exposed_inner_panel', -0.85, -0.55, 0.55, 0.58, 0.82, flip=True)
+register(ctx, 'body', inner_ob, 'body', part='inner_lining', panel=True)
+ctx.inner(inner_ob, [0])
+save('daylight_inner')
+
+# seams_test: adjacent panels testing good shut line (3 mm gap, 1 mm flush), too-tight (0.5 mm),
+# wedge gap (2 mm to 10 mm), bad flush (3.5 mm), and glass-to-body hatch seam (2.5 mm gap, 0.5 mm flush)
+ctx = empty_scene()
+# hood: x in [-0.9, 0.0], y in [-0.6, 0.6], z = 0.80 (outward +Z)
+register(ctx, 'body', mesh_object('hood', [(-0.9, -0.6, 0.8), (0.0, -0.6, 0.8), (0.0, 0.6, 0.8), (-0.9, 0.6, 0.8)],
+                                  [(0, 1, 2, 3)]), 'body', part='hood', panel=True)
+# front_bumper: good 3 mm gap (x = -0.903), 1 mm flush step (z = 0.801)
+register(ctx, 'body', mesh_object('front_bumper', [(-1.2, -0.6, 0.801), (-0.903, -0.6, 0.801), (-0.903, 0.6, 0.801),
+                                                   (-1.2, 0.6, 0.801)], [(0, 1, 2, 3)]),
+         'body', part='front_bumper', panel=True)
+# fender_wedge: wedge gap along hood right edge (y=0.602 at x=-0.9 widening to y=0.612 at x=0.0 -> 12 mm gap!)
+register(ctx, 'body', mesh_object('fender_wedge', [(-0.9, 0.602, 0.8), (0.0, 0.612, 0.8), (0.0, 0.9, 0.8),
+                                                   (-0.9, 0.9, 0.8)], [(0, 1, 2, 3)]),
+         'body', part='fender_wedge', panel=True)
+# cowl_flush_bad: good 3 mm gap (x=0.003) but 3.5 mm proud flush step (z=0.8035)
+register(ctx, 'body', mesh_object('cowl_flush_bad', [(0.003, -0.6, 0.8035), (0.4, -0.6, 0.8035), (0.4, 0.6, 0.8035),
+                                                     (0.003, 0.6, 0.8035)], [(0, 1, 2, 3)]),
+         'body', part='cowl_flush_bad', panel=True)
+# hatch & hatch_glass: clean glass-to-body seam (2.5 mm gap, 0.5 mm flush)
+register(ctx, 'body', mesh_object('hatch', [(2.4, -0.5, 1.0), (3.1, -0.5, 1.0), (3.1, 0.5, 1.0), (2.4, 0.5, 1.0)],
+                                  [(0, 1, 2, 3)]), 'body', part='hatch', panel=True)
+hg = mesh_object('hatch_glass', [(1.7, -0.5, 1.0005), (2.3975, -0.5, 1.0005), (2.3975, 0.5, 1.0005), (1.7, 0.5, 1.0005)],
+                 [(0, 1, 2, 3)])
+hg['rg_glass'] = True
+register(ctx, 'glass', hg, 'glass', part='hatch_glass')
+# quarter_tight: 0.5 mm gap (too tight < 1.5 mm) along hatch right edge (y=0.5005)
+register(ctx, 'body', mesh_object('quarter_tight', [(2.4, 0.5005, 1.0), (3.1, 0.5005, 1.0), (3.1, 0.85, 1.0),
+                                                    (2.4, 0.85, 1.0)], [(0, 1, 2, 3)]),
+         'body', part='quarter_tight', panel=True)
+save('seams_test')
 print('SCENES DONE')

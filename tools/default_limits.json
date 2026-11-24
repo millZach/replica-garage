@@ -9,6 +9,10 @@
  "fairness_max_deg": 5,
  "fairness_wave_mm": 1.0,
  "seating_step_mm": 3,
+ "seam_gap_min_mm": 1.5,
+ "seam_gap_max_mm": 5.0,
+ "seam_flush_mm": 2.0,
+ "daylight_leak_count": 0,
  "double_skin_count": 0,
  "separation_overlap_mm": 0.5
 }

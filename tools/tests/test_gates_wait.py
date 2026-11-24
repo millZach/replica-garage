@@ -22,6 +22,8 @@ def fill_round(rnd, worse=False):
         'side': {'width': 800, 'median_px': 9.0, 'p95_px': 30.0, 'grade': 'visual'}}})
     write_json(rnd / 'fairness.json', {'panels': {'door': {'p99_deg': 1.0, 'max_deg': 3.0}}})
     write_json(rnd / 'seating.json', {'seats': [{'part': 'lamp', 'on': 'bumper', 'max_abs_step_mm': 1.2}]})
+    write_json(rnd / 'daylight.json', {'total_leaks': 0, 'background_leaks': 0, 'wedge_leaks': 0,
+                                       'inner_leaks': 0, 'backface_leaks': 0, 'passed': True})
     write_json(rnd / 'rays.json', {'double_skins': 0})
     write_json(rnd / 'separation.json', {'level': 2, 'parts': [{'part': 'door', 'own_object': True,
                                                                 'pivot_ok': True}],
