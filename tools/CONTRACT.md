@@ -47,16 +47,20 @@ The manager copies this `tools/` folder into the project at Step 1, so every sub
   data/parts.json      take-apart levels 2 and 3: every part that comes off
   data/limits.json     gate limits for this project (starts as a copy of tools/default_limits.json)
   data/render.json     render settings, written by the first evidence render and reused by every later one
+  data/state.json      compact live project state (current step, round, accepted versions, blockers)
+  data/details.json    optional named exterior/cabin detail cameras for details.py
+  data/handoff.json    optional handover inventory written by showroom.py for downstream tools
   data/log.md          when each sub-agent started and stopped, and its usage where the agent tool reports it
   src/<assembly>.py    a builder's working module, with build(ctx)
   accepted/<assembly>/NN/   frozen copy of an accepted module: <assembly>.py and manifest.json
   notes/<assembly>/    brief-00.md, then note-NN.md (manager) answered by pass-NN.md (builder)
   out/vehicle.blend    the assembled vehicle, built by assemble.py
+  out/vehicle-showroom.blend  ready-to-open lit showroom scene, built by showroom.py
   out/workshop.blend   take-apart level 3: the workshop copy, built by assemble.py --build data/build-workshop.json
   out/work-<assembly>.blend  a builder's own trial assembly
   evidence/round-NN/   one frozen candidate: vehicle.blend, build.json, lit/ clay/ zebra/ closeups/ boards/,
-                       orbit/, the tools' JSON, gates.json, judge.md, marks.json, user-marks.md; at level 3
-                       also workshop.blend, build-workshop.json and exploded/
+                       orbit/, details/ (when data/details.json exists), the tools' JSON, gates.json, judge.md,
+                       marks.json, user-marks.md; at level 3 also workshop.blend, build-workshop.json and exploded/
 ```
 
 ## File formats
@@ -117,16 +121,29 @@ both sides, are the ones that solve well.
 - **`sources.json`**: per file: `file`, `url`, `licence`, `views` (a list: a blueprint sheet holds several),
   `variant_ok` (true or false), `shows`.
 - **`finishes.json`**: `proof_look`: the look every round is judged under; `looks`:
-  `{ look name: { "studio": preset, "slots": { slot: settings } } }`. Slots are free names such as `body`,
-  `wheel`, `caliper`, `glass`, `trim`, `seat`. Settings (each optional): `base_color` `[r, g, b]`, `metallic`,
-  `roughness`, `coat`, `coat_roughness`, `transmission`, `ior`, `emission` `[r, g, b]`, `emission_strength`.
-  Studio presets, built by the kit: `soft` (large soft lights, for matt and pale finishes), `gloss`
-  (hard-edged cards and strips for paint to mirror), `dark-paint` (large lit walls and a lit horizon so a dark
-  body shows its outline). Each slot is one material in the scene, named after the slot, so a look changes
-  only the materials' settings. Without finishes.json, slot materials are plain grey and lit renders use `soft`.
-  Optional: `style`, the presentation style the user chose for the pictures they look at (`showroom`,
-  `studio` or `daylight`, see the kit); `sky`, the path under `refs/` of the sky image the `daylight` style
-  needs. The project supplies the sky image; the tools ship none.
+  `{ look name: { "studio": preset, "color_management": object (optional), "slots": { slot: settings } } }`.
+  Slots are free names such as `body`, `wheel`, `caliper`, `glass`, `trim`, `seat`. Settings (each optional):
+  `base_color` `[r, g, b]`, `metallic`, `roughness`, `coat`, `coat_roughness`, `transmission`, `ior`,
+  `emission` `[r, g, b]`, `emission_strength`, `specular_ior_level`, `anisotropic`, `sheen`,
+  `sheen_roughness`, `surface` (`leather`, `perforated`, `brushed`, `carbon`, `fabric`, `rubber`),
+  `bump_strength`, `bump_scale_mm`. `color_management` (optional, per look or top-level) locks
+  `view_transform`, `look` and `exposure` across renders. Studio presets, built by the kit: `soft` (large soft
+  lights, for matt and pale finishes), `gloss` (hard-edged cards and strips for paint to mirror), `dark-paint`
+  (large lit walls and a lit horizon so a dark body shows its outline), `interior` (diffuse cabin dome and
+  soft fill lights for cabin inspection). Each slot is one material in the scene, named after the slot, so a
+  look changes only the materials' settings. Without finishes.json, slot materials are plain grey and lit
+  renders use `soft`. Optional top-level keys: `style`, the presentation style the user chose for the pictures
+  they look at (`showroom`, `studio` or `daylight`, see the kit); `sky`, the path under `refs/` of the sky
+  image the `daylight` style needs (the project supplies the sky image; the tools ship none); `end_fill_watts`
+  (soft front/rear fill-card wattage for dark-grille/diffuser legibility); `showroom` (optional overrides for
+  the showroom stage: `card_watts`, `ring_strength`, `wall_strength`, `floor_roughness`, `end_fill_watts`).
+- **`details.json`** (optional, for `details.py`): a list of `{ "name": text, "camera_mm": [x, y, z],
+  "target_mm": [x, y, z] }` with optional `up` (default `[0, 0, 1]`), `lens_mm` (default 50), `resolution`
+  `[w, h]` (default `[800, 600]`), `lighting` (`style`, `studio`, `interior` or `strip-sweep`, default `style`),
+  `hide` (list of part/object globs hidden for that view only, e.g. cutaway roof/glass), `denoise` (boolean
+  override), `toggle_part` (part glob hidden in a paired `-without.png` A/B render), `strip_angles_deg` (list
+  of azimuth offsets for moving-strip reflection checks), and `targets_mm` (`{ label: [x, y, z] }` for
+  ray-based sightline visibility checks from `camera_mm`).
 - **`build.json`**: a list of `{ "assembly": name, "version": NN, "seats": [ { "part": name, "on": panel } ] }`
   in build order. `seats` lists only the parts that sit against a body panel (a lamp in its opening, a mirror
   on a door) with the panel each sits on, using the names the builders registered; it is `[]` when there are
@@ -152,16 +169,22 @@ both sides, are the ones that solve well.
 - Every position the kit takes or gives is in **millimetres, vehicle coordinates**: `ctx.add(pivot=...)`,
   `ctx.part(...)["pivot"]`, `ctx.body.hit` and `ctx.body.nearest`. The objects a module builds live in the
   scene in metres; `ctx.mm` converts for the module's own code.
-- `ctx.add(obj, part=..., panel=False, separable=False, pivot=None)`: registers an object under the calling
-  assembly. `panel=True` marks painted skin for the fairness and double-skin gates. `part` defaults to the
-  object's name. A part that comes off is one object. `pivot` moves the object's origin there without moving
-  its geometry.
+- `ctx.add(obj, part=..., panel=False, separable=False, pivot=None, exterior=True)`: registers an object
+  under the calling assembly. `panel=True` marks painted skin for the fairness and double-skin gates. `part`
+  defaults to the object's name. A part that comes off is one object. `pivot` moves the object's origin there
+  without moving its geometry. Pass `exterior=False` for cabin, wheelhouse, brake, chassis, or engine-bay
+  geometry that is not meant to be measured by exterior close-up and orbit coverage.
 - `ctx.crease(obj, edges)`: marks edges that are real creases, so the fairness gate leaves them out.
 - `ctx.inner(obj, faces)`: marks faces of a panel that are not its outer skin, so the fairness and double-skin
   gates and `ctx.body` see only the outer skin. A removable panel (bonnet, door skin) is one object registered
   with `panel=True, separable=True`; its returned edge (the hem folded under its border) and its inner face are
   marked with `ctx.inner`. The body's own door shuts (jambs) are not panels: build them as their own objects
   without `panel=True`, or mark them with `ctx.inner`.
+- `ctx.seat_edge(obj, verts)`: marks the vertices along a closed solid's mating perimeter (vertex group
+  `rg_seat`) so `seating.py` measures its real contact rim instead of falling back to open boundary edges.
+- `ctx.publish_interface(name, data)` and `ctx.interface(name)`: publish and read named geometric contracts
+  (for example sill/cowl planes, beltline curves, daylight openings, wheel-well apertures) in JSON on the scene
+  (`rg_interfaces`), so later assemblies match an earlier assembly's exact curves without re-inventing them.
 - `ctx.material(slot)`: the material for a slot in the current look. Changing look changes no geometry. A slot
   the look does not list is an error in the module.
 - `ctx.body.hit(origin, direction)` and `ctx.body.nearest(point)`: where the painted skin is, for parts that
@@ -171,9 +194,10 @@ both sides, are the ones that solve well.
   The wheel turns about the vertical axis through its origin.
 - `ctx.part(name)`: the part's entry in `parts.json`, so a builder can pass its pivot to `ctx.add`.
 
-The kit also builds the light the render tools use. The three **studio presets** (`soft`, `gloss`,
-`dark-paint`) light evidence renders: lights and a world only, nothing in the picture. The three
-**presentation styles** are for the pictures people look at, used by `orbit.py` and `closeups.py --style`:
+The kit also builds the light the render tools use. The four **studio presets** (`soft`, `gloss`,
+`dark-paint`, `interior`) light evidence and detail renders: lights and a world only, nothing in the picture.
+The three **presentation styles** are for the pictures people look at, used by `orbit.py`, `closeups.py --style`,
+`details.py` and `showroom.py`:
 
 | Style | What it is |
 |---|---|
@@ -185,27 +209,31 @@ A style's floor, backdrop and ring are tagged `rg_style` and are never part of t
 box or coverage count sees them.
 
 The kit records what it is told on each object, and the tools read nothing else to find panels, creases and
-parts: custom properties `rg_assembly`, `rg_part`, `rg_panel`, `rg_separable`, `rg_steer`; the boolean edge
-attribute `rg_crease`; the boolean face attribute `rg_inner`.
+parts: custom properties `rg_assembly`, `rg_part`, `rg_panel`, `rg_separable`, `rg_exterior`, `rg_steer`;
+scene properties `rg_build`, `rg_interfaces`; vertex group `rg_seat`; boolean edge attribute `rg_crease`;
+boolean face attribute `rg_inner`.
 
 ## The tools
 
 | Tool | Runs in | Input | Output |
 |---|---|---|---|
 | `solve_cameras.py` | Python | `vehicle.json`, `landmarks.json` | `cameras.json`. A photo solves to a perspective camera: position, rotation, focal length (held at `focal_mm` / `sensor_mm` times the file's width when given) and the optical centre at the middle of the file (`--free-centre` solves it too). A drawing solves to an orthographic one: scaled and placed from its landmarks. Each view, photo or drawing, is graded `precise` when its error at the known points is inside the camera limit, otherwise `visual`. Exit 1 when fewer than `--min-precise` views (default `min_precise_views` from the limits, 3) are precise. With `--triangulate <pixels file>` it instead takes one feature seen in two or more solved views and prints its position on the vehicle and how far off it lands in each view, also written beside the pixels file as `<name>-triangulated.json`. |
-| `mask_photo.py` | Python | one view from `landmarks.json`; optional `--seed <render of the same view>` | `refs/masks/<view>.png` and a preview with the mask's edge drawn on the picture, to be checked by eye. A photo on a plain background works alone. A drawing works alone too: the mask is everything inside its outermost line, within the view's crop. A photo on a busy background needs `--seed`: a render of the model through that view's camera, which tells it roughly where the vehicle is. Exit 1 when the mask touches the picture's edge, covers under 1% or over 95% of it, or (a photo without a seed) the background is not plain. |
+| `mask_photo.py` | Python | one view from `landmarks.json`; optional `--seed <render>`, `--close-px N` | `refs/masks/<view>.png` and a preview with the mask's edge drawn on the picture, to be checked by eye. A photo on a plain background works alone. A drawing works alone too: the mask is everything inside its outermost line, within the view's crop; `--close-px` bridges dashed lines in technical drawings before filling. A photo on a busy background needs `--seed`: a render of the model through that view's camera, which tells it roughly where the vehicle is. Exit 1 when the mask touches the picture's edge, covers under 1% or over 95% of it, or (a photo without a seed) the background is not plain. |
+| `accept.py` | Python | `<assembly> <version>`, optional `--depends-on`, `--seats`, `--build`, `--also-build`, `--force` | Copies `src/<assembly>.py` to `accepted/<assembly>/NN/<assembly>.py`, writes its SHA-256 `manifest.json`, and updates `data/build.json` plus any additional build lists (such as `data/build-workshop.json`) that already list the assembly. Refuses to overwrite an existing version with a different hash unless `--force` is passed. |
 | `assemble.py` | Blender | `--build <file>` (default `data/build.json`); optional `--working <assembly>`; `--look <name>`; `--out` | Checks every accepted module against its manifest hash, runs each `build(ctx)` in order in a clean scene and saves the result to `--out`: by default `out/vehicle.blend`, `out/workshop.blend` for `--build data/build-workshop.json`, `out/work-<assembly>.blend` with `--working`. `--working <assembly>` takes that one module from `src/` in place of its accepted version, or after the listed ones if it is not in the list yet. Exit 1 on a hash mismatch, an assembly in `depends_on` that is not built earlier in the list, or any module error; nothing is saved then. |
-| `render_views.py` | Blender | scene, `cameras.json`, `--mode lit\|clay\|zebra`, `--look`, `--out`; optional `--view <name>` and `--trial` | One render per camera, or only the named view, at its picture's own size and steering angle, orthographic cameras included: `<out>/<view>.png` with a transparent background, so its alpha is the silhouette. *Lit* is the look under its studio preset; *clay* is plain grey, to show shape without paint; *zebra* mirrors 40 stripes in the paint, to show ripples: 40 white bands evenly spaced in elevation, each half of its 4.5 degree period. An evidence run writes its sampling and device to `data/render.json` the first time and reads them from it afterwards, so every round matches: once the file exists, `--samples` and `--device` are ignored and the output says so. `--trial` is for builders: half size, few samples, and it neither reads nor writes `render.json`. Exit 1 when a view's camera in Blender lands more than 0.5 px from the cameras.json model, or a view shows no vehicle. |
-| `compare.py` | Python | pictures, masks, renders, `cameras.json` | `boards/<view>.jpg` (picture beside render, same scale) and `outline.json`: median and 95th-percentile distance between the two silhouettes per view, scaled to a 1600 px wide image. Only precise views count toward the gate; a precise view with no mask counts as failed. |
+| `render_views.py` | Blender | scene, `cameras.json`, `--mode lit\|clay\|zebra`, `--look`, `--out`; optional `--view`, `--trial`, `--resume` | One render per camera, or only the named view, at its picture's own size and steering angle, orthographic cameras included: `<out>/<view>.png` with a transparent background, so its alpha is the silhouette. *Lit* is the look under its studio preset; *clay* is plain grey, to show shape without paint; *zebra* mirrors 40 stripes in the paint, to show ripples: 40 white bands evenly spaced in elevation, each half of its 4.5 degree period. An evidence run writes its sampling and device to `data/render.json` the first time and reads them from it afterwards, so every round matches: once the file exists, `--samples` and `--device` are ignored and the output says so. `--trial` is for builders: half size, few samples, and it neither reads nor writes `render.json`. `--resume` skips views whose output PNG is already valid. Exit 1 when a view's camera in Blender lands more than 0.5 px from the cameras.json model, or a view shows no vehicle. |
+| `compare.py` | Python | pictures, masks, renders, `cameras.json`; optional `--keep-holes` | `boards/<view>.jpg` (picture beside render, same scale) and `outline.json`: median and 95th-percentile distance between the two silhouettes per view, scaled to a 1600 px wide image. Internal transparent holes (glass, wheel spokes, grille mesh) are filled before comparing against the solid photo mask unless `--keep-holes` is passed; an optional `<masks>/<view>-ignore.png` excludes cropped-out or illustrative regions (such as ground shadows or illustrative drawing wheels) from both masks. Only precise views count toward the gate; a precise view with no mask counts as failed. |
 | `dimensions.py` | Blender | scene, `vehicle.json` | `dimensions.json`: each dimension with its error in mm. Width leaves out parts whose name contains "mirror". Estimated dimensions and dimensions the maker gives no figure for are reported and not judged. |
-| `closeups.py` | Blender | scene, `--size-mm` (default 600), `--mode`, `--look`, `--out`; optional `--hide <part>,<part>,...`, `--style` | The **close-up ring**: close views covering both sides, front, rear and roof, named by position, with `closeups.json`. The tool checks that both sides are covered: exit 1 when any region's coverage of the surface seen from outside is under 95%. It runs on whatever scene it is given (`vehicle.blend`, `workshop.blend`); `--hide` takes several parts at once, so nested parts can be uncovered. Under the look's studio preset by default; `--style` (and `--sky`) renders it in a presentation style instead. |
-| `orbit.py` | Blender | scene, `--look`, `--style showroom\|studio\|daylight`, `--out`; optional `--beauty`, `--views` | The vehicle from all round under the look (default the proof look) in the style (default `style` in finishes.json, else `showroom`): `<out>/<position>.png` and `orbit.json`. Eight views evenly round at hip height (900 mm; `front`, `front-left`, `left`, `rear-left`, `rear`, `rear-right`, `right`, `front-right`, named by where the camera stands) and two from 40 degrees above (`above-front-left`, `above-rear-right`), each on an 85 mm lens and set back until the vehicle fills 85% of the frame. Evidence quality by default: 1200 by 800, sampling and device by the `data/render.json` rule. `--beauty`: twice the size and four times the samples (at least 256), never writing `render.json`. Exit 1 when a view does not hold the whole vehicle inside its frame, or the left or right side is covered under 95% (measured as in `closeups.py`). |
-| `fairness.py` | Blender | scene | `fairness.json`: for each panel, the angle between neighbouring faces at the 99th percentile and the maximum, leaving out marked creases (and edges within 10 mm of them) and faces marked inner. |
+| `closeups.py` | Blender | scene, `--size-mm` (default 600), `--mode`, `--look`, `--out`; optional `--hide`, `--style`, `--poses-from`, `--resume` | The **close-up ring**: close views covering both sides, front, rear and roof, named by position, with `closeups.json`. `--poses-from <closeups.json>` replays an earlier round's exact camera stations for A/B comparison; `--resume` skips already-rendered valid PNGs. Checks that both sides and exterior regions (`rg_exterior` objects, outer shell faces only) reach 95% coverage, and lists `uncovered_by_object` when coverage is short. `--hide` takes several parts at once, so nested parts can be uncovered. Under the look's studio preset by default; `--style` (and `--sky`) renders it in a presentation style instead. |
+| `orbit.py` | Blender | scene, `--look`, `--style showroom\|studio\|daylight`, `--out`; optional `--beauty`, `--views`, `--poses-from`, `--resume` | The vehicle from all round under the look (default the proof look) in the style (default `style` in finishes.json, else `showroom`): `<out>/<position>.png` and `orbit.json`. Eight views evenly round at hip height (900 mm; `front`, `front-left`, `left`, `rear-left`, `rear`, `rear-right`, `right`, `front-right`, named by where the camera stands) and two from 40 degrees above (`above-front-left`, `above-rear-right`), each on an 85 mm lens and set back until the vehicle fills 85% of the frame. `--poses-from <orbit.json>` replays exact camera stations across rounds; `--resume` skips valid existing renders. Evidence quality by default: 1200 by 800, sampling and device by the `data/render.json` rule. `--beauty`: twice the size and four times the samples (at least 256), never writing `render.json`. Exit 1 when a view does not hold the whole vehicle inside its frame, or the left or right exterior side is covered under 95% (measured as in `closeups.py`). |
+| `details.py` | Blender | scene, `--spec` (default `data/details.json`), `--out`; optional `--views`, `--look`, `--style`, `--resume`, `--sightlines`, `--fail-on-occluded`, `--no-render` | Renders repeatable named exterior and cabin detail cameras with per-view cutaway `hide` lists (automatically restored), `style`/`studio`/`interior`/`strip-sweep` lighting, paired `toggle_part` A/B renders, `denoise` overrides, and ray-based `targets_mm` sightline visibility checks. Writes `<out>/<name>.png` and `<out>/details.json`. Exit 1 when `--fail-on-occluded` is set and any sightline target is blocked. |
+| `showroom.py` | Blender | scene; optional `--out`, `--look`, `--style`, `--camera`, `--lens`, `--resolution`, `--handoff` | Saves a ready-to-open lit `.blend` (default `out/vehicle-showroom.blend`) with look, colour management, presentation style, Cycles settings and a framing camera, plus optional `--handoff` JSON (`data/handoff.json`) listing assemblies, steerable parts, emissive slots and published interfaces for downstream tools. |
+| `fairness.py` | Blender | scene; optional `--wave-radius-mm 60`, `--max-wave-mm 1.0`, `--base-mesh` | `fairness.json`: for each painted panel (away from marked creases and inner faces), the adjacent-face angle at the 99th percentile and maximum, plus resolution-independent multi-scale waviness (`wave_mm`, peak departure from a local smooth quadratic over a `--wave-radius-mm` patch) with its location in mm. |
 | `rays.py` | Blender | scene, `cameras.json`; `--grid N` (default 64: a 64 by 64 grid through each camera) or `--pixels <pixels file>` | `rays.json`: for each ray, every surface it passes through in order: object, material, position. With `--grid` the list is a compact table per view (object and material names once, then one row per ray), and it also lists every place where one painted panel lies within `--stack-mm` (default 10) behind another: a double skin. Each panel is traced on its own for this, so coincident skins are found. `--pixels` traces object by object for a full listing. |
-| `seating.py` | Blender | scene, and either `build.json` or `--part <name> --on <panel>` | `seating.json`: for each listed part, the signed step in mm between part and panel at points all round the part's edge (+ proud, − sunk). A builder uses the `--part` form on its own trial assembly. A seat in build.json whose part or panel is not in the scene fails. |
+| `seating.py` | Blender | scene, and either `build.json` or `--part <name> --on <panel>` | `seating.json`: for each listed part, the signed step in mm between part and panel at points all round the part's edge (+ proud, − sunk). Auto-detects the `rg_seat` vertex group (from `ctx.seat_edge`) on closed parts when `--edge-group` is omitted. A builder uses the `--part` form on its own trial assembly. A seat in build.json whose part or panel is not in the scene fails. |
 | `separation.py` | Blender | scene, `parts.json`, `--level 2\|3` | `separation.json`: each listed part is its own object with its pivot, and no two overlap by more than `--tolerance-mm` (default 0.5). Also renders an exploded view, `<out>/exploded.png`. `--level 2` checks only the parts with `"level": 2`; `--level 3` checks all. |
 | `annotate.py` | Python | a picture and `marks.json` | The marked picture, each mark numbered (default `<name>-marked.<ext>` beside the picture). Exit 1 when a mark lies outside the picture: its pixels belong to another picture. |
-| `gates.py` | Python | one `evidence/round-NN/` folder, `limits.json` | `gates.json` in that folder: every gate with its value, its limit and pass or fail, the overall result, and which limits differ from the defaults. A needed gate with no evidence in the round fails unless skipped with `--skip`; separation is needed only when `data/parts.json` exists. |
+| `gates.py` | Python | one `evidence/round-NN/` folder, `limits.json` | `gates.json` in that folder: every gate with its value, its limit and pass or fail, the overall result, and which limits differ from the defaults. Prefers the round's frozen `cameras.json` over `data/cameras.json` and deduplicates repeated seating records. A needed gate with no evidence in the round fails unless skipped with `--skip`; separation is needed only when `data/parts.json` exists. |
 | `wait_for.py` | Python | a file path and a timeout | Exit 0 when the file exists and has stopped changing, 1 on timeout. |
 
 ### What "own object with its pivot" means
@@ -227,7 +255,7 @@ These come from one build and are starting points, shipped as `tools/default_lim
 | Precise views | at least 3 | `min_precise_views` |
 | Overall dimensions | each within 10 mm of the maker's figure | `dimension_error_mm` |
 | Outline against each precise view | median 3 px, 95th percentile 8 px, at 1600 px width | `outline_median_px`, `outline_p95_px`, `outline_ref_width_px` |
-| Panel fairness away from creases | 99th percentile 2.5 degrees, maximum 5 degrees | `fairness_p99_deg`, `fairness_max_deg` |
+| Panel fairness away from creases | 99th percentile 2.5 degrees, maximum 5 degrees, waviness 1.0 mm over 60 mm patch | `fairness_p99_deg`, `fairness_max_deg`, `fairness_wave_mm` |
 | Part seating | step no more than 3 mm round the whole edge | `seating_step_mm` |
 | Double skin | none | `double_skin_count` (0) |
 | Separation (levels 2 and 3) | overlap no more than 0.5 mm | `separation_overlap_mm` |

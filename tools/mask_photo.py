@@ -71,20 +71,25 @@ def plain_photo(rgb, threshold):
                                                                       background_spread=spread, threshold=float(t))
 
 
-def drawing(rgb, threshold):
+def drawing(rgb, threshold, close_px=None):
     grey = rgb.mean(2)
     t = threshold if threshold is not None else otsu(grey)
     ink = grey < t
     h, w = ink.shape
-    k = max(1, int(round(min(h, w) / 300)))
-    closed = ndimage.binary_dilation(ink, iterations=k)          # bridge small gaps in the outline
+    k = int(close_px) if close_px is not None else max(1, int(round(min(h, w) / 300)))
+    if k > 0:
+        yy, xx = np.ogrid[-k:k + 1, -k:k + 1]
+        disk = (xx * xx + yy * yy) <= k * k
+        closed = ndimage.binary_dilation(ink, structure=disk)    # bridge small or dashed gaps in the outline
+    else:
+        closed = ink
     filled = ndimage.binary_fill_holes(closed)
     lab, n = ndimage.label(filled)
     if n > 1:
         sizes = ndimage.sum(filled, lab, range(1, n + 1))
         filled = lab == (1 + int(np.argmax(sizes)))
-    m = ndimage.binary_erosion(filled, iterations=k, border_value=1)
-    return m, dict(ink_threshold=float(t))
+    m = ndimage.binary_erosion(filled, structure=disk, border_value=1) if k > 0 else filled
+    return m, dict(ink_threshold=float(t), close_px=k)
 
 
 def seeded(rgb, seed, band):
@@ -137,8 +142,12 @@ def main(argv):
     ap.add_argument('--seed')
     ap.add_argument('--out-dir')
     ap.add_argument('--threshold', type=float)
+    ap.add_argument('--close-px', type=int, default=None,
+                    help='closing radius in px for kind "drawing" (bridge dashed lines on design patents)')
     ap.add_argument('--max-background-spread', type=float, default=18.0)
     a = ap.parse(argv)
+    if a.close_px is not None and a.close_px < 0:
+        raise BadInput('--close-px must be >= 0')
     project = os.path.abspath(a.project)
     lm = F.landmarks(load_json(a.landmarks or os.path.join(project, 'data', 'landmarks.json'), 'landmarks.json'))
     if not isinstance(lm, list):
@@ -167,7 +176,7 @@ def main(argv):
         m, info = seeded(rgb, sm, max(2, int(round(0.03 * max(w, h)))))
         method = 'seed'
     elif kind == 'drawing':
-        m, info = drawing(rgb, a.threshold)
+        m, info = drawing(rgb, a.threshold, a.close_px)
         method = 'drawing'
     else:
         m, info = plain_photo(rgb, a.threshold)

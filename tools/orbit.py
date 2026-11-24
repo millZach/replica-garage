@@ -31,7 +31,7 @@ from mathutils import Vector
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _blender as B  # noqa: E402
 import closeups  # noqa: E402
-from _common import ArgParser, BadInput, EXIT_GATE, EXIT_OK, save_json  # noqa: E402
+from _common import ArgParser, BadInput, EXIT_GATE, EXIT_OK, load_json, save_json  # noqa: E402
 
 USAGE = ('blender -b <scene.blend> --python tools/orbit.py -- --out DIR [--project DIR] [--look NAME] '
          '[--style showroom|studio|daylight] [--beauty]')
@@ -78,6 +78,22 @@ def place(direction, target, corners, tx, ty, fill, height):
     return at(hi)
 
 
+def replay_orbit(path, unit, lens, width, height):
+    rows = load_json(path, 'baseline orbit cameras')['views']
+    expected = RING + tuple(name for name, _ in ABOVE)
+    if tuple(row['name'] for row in rows) != expected:
+        raise BadInput('baseline orbit must contain all ten standard viewpoints in order')
+    target = np.asarray(rows[0]['target_mm']) / unit
+    views = []
+    for row in rows:
+        if (row['lens_mm'] != lens or row['sensor_mm'] != 36 or
+            row['resolution'][0] * height != row['resolution'][1] * width or
+            row['up'] != [0, 0, 1] or row['target_mm'] != rows[0]['target_mm']):
+            raise BadInput('baseline orbit intrinsics, target or up vector differ from the requested framing')
+        views.append(dict(name=row['name'], camera=np.asarray(row['camera_mm']) / unit))
+    return target, views
+
+
 def main(argv):
     ap = ArgParser(usage_line=USAGE)
     ap.add_argument('--out', required=True)
@@ -86,6 +102,8 @@ def main(argv):
     ap.add_argument('--height-mm', type=float, default=900.0)
     ap.add_argument('--fill', type=float, default=0.85)
     ap.add_argument('--resolution')
+    ap.add_argument('--poses-from', help='replay all ten cameras from an orbit.json, including at beauty resolution')
+    ap.add_argument('--resume', action='store_true', help='skip views whose output PNG already exists at the right size')
     ap.add_argument('--min-coverage', type=float, default=0.95)
     ap.add_argument('--samples-surface', type=int, default=3000)
     ap.add_argument('--views', default='', help='render only these views (coverage is still measured for all ten)')
@@ -118,26 +136,30 @@ def main(argv):
     geo = B.visible_geometry()
     if not geo:
         raise BadInput('the scene has no visible geometry')
+    cov_geo = [ob for ob in geo if ob.get('rg_exterior', True)] or geo
     u = B.mm_per_unit()
     lo, hi = B.bbox(geo)
-    corners = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
+    corners = B.framing_corners(geo)
     target = (lo + hi) / 2
     tx = 18.0 / a.lens
     ty = tx * H / W
-    views = []
-    for name in RING:
-        C = place(heading(name), target, corners, tx, ty, a.fill, a.height_mm / u)
-        views.append(dict(name=name, camera=C))
-    for name, base in ABOVE:
-        e = math.radians(40.0)
-        d = heading(base) * math.cos(e) + np.array([0, 0, math.sin(e)])
-        views.append(dict(name=name, camera=place(d, target, corners, tx, ty, a.fill, None)))
+    if a.poses_from:
+        target, views = replay_orbit(a.poses_from, u, a.lens, W, H)
+    else:
+        views = []
+        for name in RING:
+            C = place(heading(name), target, corners, tx, ty, a.fill, a.height_mm / u)
+            views.append(dict(name=name, camera=C))
+        for name, base in ABOVE:
+            e = math.radians(40.0)
+            d = heading(base) * math.cos(e) + np.array([0, 0, math.sin(e)])
+            views.append(dict(name=name, camera=place(d, target, corners, tx, ty, a.fill, None)))
     for v in views:
         fwd = target - v['camera']
         v.update(centre=target, direction=fwd / np.linalg.norm(fwd), up=np.array([0, 0, 1.0]), tan=(tx, ty))
         v['fill'] = frame_ratio(v['camera'], target, corners, tx, ty)
     far = float(np.linalg.norm(hi - lo)) * 4 + max(float(np.linalg.norm(v['camera'] - target)) for v in views) * 2
-    stats = closeups.coverage(geo, views, math.atan(tx), ['left', 'right'], a.samples_surface, eps=0.5 / u, far=far)
+    stats = closeups.coverage(cov_geo, views, math.atan(tx), ['left', 'right'], a.samples_surface, eps=0.5 / u, far=far)
     ok = True
     for r, st in stats.items():
         st['passed'] = st['fraction'] is not None and st['fraction'] >= a.min_coverage
@@ -162,15 +184,23 @@ def main(argv):
         uv = np.array([p for p, _ in px])
         fill = float(max(np.ptp(uv[:, 0]) / W, np.ptp(uv[:, 1]) / H))
         f = os.path.join(os.path.abspath(a.out), v['name'] + '.png')
-        B.render_to(f)
+        resumed = False
+        if a.resume and B.valid_image(f, (W, H)):
+            resumed = True
+        else:
+            B.render_to(f)
         good = inside and fill >= 0.5
         ok &= good
         rows.append(dict(name=v['name'], file=f, camera_mm=(v['camera'] * u).tolist(), target_mm=(target * u).tolist(),
                          direction=v['direction'].tolist(), up=[0.0, 0.0, 1.0], lens_mm=a.lens, sensor_mm=36.0,
-                         resolution=[W, H], vehicle_inside=bool(inside), fill=fill, passed=bool(good)))
-        print('VIEW %-17s fill %.2f  %s' % (v['name'], fill, 'pass' if good else 'FAIL (vehicle not inside the frame)'))
+                         resolution=[W, H], vehicle_inside=bool(inside), fill=fill, resumed=resumed,
+                         passed=bool(good)))
+        print('VIEW %-17s fill %.2f  %s%s' % (v['name'], fill,
+                                              'pass' if good else 'FAIL (vehicle not inside the frame)',
+                                              ' (resumed)' if resumed else ''))
     B.write_settings(write_to, s, dev)
-    res = dict(style=style, sky=sky, look=look, beauty=a.beauty, settings=dict(s, **dev), ignored_arguments=ignored,
+    res = dict(style=style, sky=sky, look=look, beauty=a.beauty, poses_from=a.poses_from,
+               settings=dict(s, **dev), ignored_arguments=ignored,
                hidden=hidden, views=rows, coverage=stats, min_coverage=a.min_coverage, passed=bool(ok))
     save_json(os.path.join(a.out, 'orbit.json'), res)
     return EXIT_OK if ok else EXIT_GATE

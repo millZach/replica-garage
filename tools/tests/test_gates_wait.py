@@ -100,3 +100,65 @@ def test_wait_for_bad_input(tmp_path):
     assert run_tool('wait_for.py', tmp_path, 1).returncode == 2
     assert run_tool('wait_for.py', tmp_path / 'x', -1).returncode == 2
     assert os.path.isfile(os.path.join(TOOLS, 'wait_for.py'))
+
+
+def test_gates_frozen_cameras_dedupe_seating_wave_and_visual_unmasked(project):
+    rnd = project / 'evidence' / 'round-01'
+    fill_round(rnd)
+    # Put a failing cameras.json in data/ while round has passing cameras.json: round must win
+    cam = camera_at((-5000.0, -4000.0, 1500.0))
+    write_json(project / 'data' / 'cameras.json', {'cameras': {
+        'only': camera_entry(cam, rms_mm=99.0, grade='visual')}})
+    # Add a duplicate seating record in a second seating file
+    write_json(rnd / 'seating-extra.json', {'seats': [
+        {'part': 'lamp', 'on': 'bumper', 'max_abs_step_mm': 1.2},
+        {'part': 'mirror', 'on': 'door', 'max_abs_step_mm': 1.5}]})
+    # Unmasked visual view in outline.json should NOT be marked failed
+    write_json(rnd / 'outline.json', {'views': {
+        'front-34': {'width': 800, 'median_px': 1.0, 'p95_px': 3.0, 'grade': 'precise', 'counted': True},
+        'side': {'width': 800, 'grade': 'visual', 'counted': False, 'passed': None, 'note': 'no mask for this view'}}})
+    r = run_tool('gates.py', rnd)
+    assert r.returncode == 0, r.stdout + r.stderr
+    g = read_json(rnd / 'gates.json')
+    seat_items = [x['item'] for x in g['gates'] if x['gate'] == 'seating']
+    assert seat_items == ['lamp on bumper', 'mirror on door']
+    vis = [x for x in g['gates'] if x['gate'] == 'outline' and x['item'] == 'side'][0]
+    assert vis['counted'] is False and vis['passed'] is True
+    # Now fail on fairness_wave_mm (default 1.0 mm), then loosen limit and pass
+    write_json(rnd / 'fairness.json', {'panels': {'door': {'p99_deg': 1.0, 'max_deg': 2.0, 'wave_mm': 2.4}}})
+    assert run_tool('gates.py', rnd).returncode == 1
+    assert read_json(rnd / 'gates.json')['summary']['fairness'] == 'fail'
+    write_json(project / 'data' / 'limits.json', {'fairness_wave_mm': 3.0})
+    assert run_tool('gates.py', rnd).returncode == 0
+
+
+def test_accept_freezes_manifest_updates_builds_and_guards_overwrite(project):
+    assert run_tool('accept.py').returncode == 2
+    src = project / 'src'
+    os.makedirs(src, exist_ok=True)
+    (src / 'body.py').write_text('def build(ctx):\n    pass\n', encoding='utf-8')
+    (src / 'front.py').write_text('def build(ctx):\n    pass\n', encoding='utf-8')
+    # Pre-create a workshop build list containing only body (not front)
+    ws = write_json(project / 'data' / 'build-workshop.json', [
+        {'assembly': 'body', 'version': 0, 'seats': []}])
+    seats = write_json(project / 'seats_front.json', [{'part': 'lamp', 'on': 'bumper'}])
+    r = run_tool('accept.py', 'body', '1', '--project', project, '--also-build', ws)
+    assert r.returncode == 0, r.stdout + r.stderr
+    acc_mod = project / 'accepted' / 'body' / '01' / 'body.py'
+    man = read_json(project / 'accepted' / 'body' / '01' / 'manifest.json')
+    assert acc_mod.is_file() and man['assembly'] == 'body' and man['version'] == 1 and len(man['sha256']) == 64
+    assert read_json(project / 'data' / 'build.json') == [{'assembly': 'body', 'version': 1, 'seats': []}]
+    assert read_json(ws) == [{'assembly': 'body', 'version': 1, 'seats': []}]
+    # Accept front with depends-on and seats: added to build.json, NOT added to workshop list since absent there
+    r2 = run_tool('accept.py', 'front', '0', '--project', project, '--depends-on', 'body',
+                  '--seats', seats, '--also-build', ws)
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    assert len(read_json(ws)) == 1
+    assert read_json(project / 'data' / 'build.json')[1] == {
+        'assembly': 'front', 'version': 0, 'seats': [{'part': 'lamp', 'on': 'bumper'}]}
+    assert read_json(project / 'accepted' / 'front' / '00' / 'manifest.json')['depends_on'] == ['body']
+    # Modifying src/body.py and re-accepting version 1 refuses without --force, succeeds with --force
+    (src / 'body.py').write_text('def build(ctx):\n    return 1\n', encoding='utf-8')
+    assert run_tool('accept.py', 'body', '1', '--project', project).returncode == 2
+    assert run_tool('accept.py', 'body', '1', '--project', project, '--force').returncode == 0
+    assert read_json(project / 'accepted' / 'body' / '01' / 'manifest.json')['sha256'] != man['sha256']

@@ -62,7 +62,9 @@ def collect(rnd, project, L):
         rows.append(r)
 
     grades = {}
-    cams = find(rnd, lambda n: n == 'cameras.json')
+    frozen_cams = [p for p in (os.path.join(rnd, 'cameras.json'),
+                               os.path.join(rnd, 'inputs', 'data', 'cameras.json')) if os.path.isfile(p)]
+    cams = frozen_cams[:1] or find(rnd, lambda n: n == 'cameras.json')
     if not cams and os.path.isfile(os.path.join(project, 'data', 'cameras.json')):
         cams = [os.path.join(project, 'data', 'cameras.json')]
     for p in cams[:1]:
@@ -96,7 +98,7 @@ def collect(rnd, project, L):
         for v, s in d['views'].items():
             counted = grades.get(v, s.get('grade')) == 'precise'
             if s.get('median_px') is None:
-                add('outline', v, None, L['outline_median_px'], False, p, counted=counted, unit='px',
+                add('outline', v, None, L['outline_median_px'], not counted, p, counted=counted, unit='px',
                     note=s.get('note', 'not measured'))
                 continue
             k = ref / float(s['width'])
@@ -118,14 +120,26 @@ def collect(rnd, project, L):
                 continue
             add('fairness', k + ' p99', p99, L['fairness_p99_deg'], p99 <= L['fairness_p99_deg'], p, unit='deg')
             add('fairness', k + ' max', mx, L['fairness_max_deg'], mx <= L['fairness_max_deg'], p, unit='deg')
+            wv = num(s.get('wave_mm'))
+            if wv is not None:
+                add('fairness', k + ' wave', wv, L['fairness_wave_mm'], wv <= L['fairness_wave_mm'], p, unit='mm')
 
-    for p in find(rnd, lambda n: n.startswith('seating')):
+    seat_files = find(rnd, lambda n: n.startswith('seating'))
+    seat_files.sort(key=lambda path: os.path.dirname(path) != rnd)
+    seen_seats = set()
+    for p in seat_files:
         d = load_json(p)
-        seats = d.get('seats')
+        seats = d if isinstance(d, list) else d.get('seats')
         if not isinstance(seats, list):
             bad(p, 'no "seats" list')
         for s in seats:
+            if not isinstance(s, dict) or not s.get('part') or not s.get('on'):
+                bad(p, 'each seat needs "part" and "on"')
             m = num(s.get('max_abs_step_mm'))
+            key = (s['part'], s['on'], m)
+            if key in seen_seats:
+                continue
+            seen_seats.add(key)
             add('seating', '%s on %s' % (s.get('part'), s.get('on')), m, L['seating_step_mm'],
                 m is not None and m <= L['seating_step_mm'], p, unit='mm',
                 **({} if m is not None else {'note': s.get('note', 'not measured')}))

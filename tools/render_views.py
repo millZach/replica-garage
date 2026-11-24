@@ -35,6 +35,7 @@ def main(argv):
     ap.add_argument('--cameras')
     ap.add_argument('--view')
     ap.add_argument('--trial', action='store_true')
+    ap.add_argument('--resume', action='store_true', help='skip views whose output PNG already exists at the right size')
     ap.add_argument('--max-projection-px', type=float, default=0.5)
     B.add_project_arg(ap)
     B.add_render_args(ap)
@@ -69,7 +70,9 @@ def main(argv):
         cam = B.camera_from_view(v, c, scale)
         model = Camera.from_dict(c)
         W, H = B.bpy.context.scene.render.resolution_x, B.bpy.context.scene.render.resolution_y
+        sx, sy = W / float(c['width']), H / float(c['height'])
         undo = kit.steer(float(c['steer_deg']))
+        resumed = False
         try:
             errs = []
             for X in corners:
@@ -77,10 +80,13 @@ def main(argv):
                     continue
                 want = model.project(X * mmu)[0]
                 got, _ = B.project_px(cam, X, W, H)
-                got = (got + 0.5) / scale - 0.5            # back to the picture's pixels
+                got = np.array([(got[0] + 0.5) / sx - 0.5, (got[1] + 0.5) / sy - 0.5])  # back to picture pixels
                 errs.append(float(np.hypot(*(got - want))))
             path = os.path.join(os.path.abspath(a.out), v + '.png')
-            B.render_to(path)
+            if a.resume and B.valid_image(path, (W, H)):
+                resumed = True
+            else:
+                B.render_to(path)
         finally:
             undo()
         cover = B.alpha_fraction(path)
@@ -89,9 +95,10 @@ def main(argv):
         ok &= all(checks.values())
         res['views'][v] = dict(file=path, width=W, height=H, kind=c.get('kind', 'perspective'),
                                steer_deg=c.get('steer_deg', 0), grade=c.get('grade'), projection_error_px=perr,
-                               vehicle_fraction=cover, checks=checks, passed=all(checks.values()))
-        print('VIEW %s %dx%d projection %.3f px  vehicle %.1f%%  %s'
-              % (v, W, H, perr if perr is not None else -1, 100 * cover, 'pass' if all(checks.values()) else 'FAIL'))
+                               vehicle_fraction=cover, resumed=resumed, checks=checks, passed=all(checks.values()))
+        print('VIEW %s %dx%d projection %.3f px  vehicle %.1f%%  %s%s'
+              % (v, W, H, perr if perr is not None else -1, 100 * cover,
+                 'pass' if all(checks.values()) else 'FAIL', ' (resumed)' if resumed else ''))
     B.write_settings(write_to, s, dev)
     res['passed'] = bool(ok)
     save_json(os.path.join(a.out, 'render_views.json'), res)

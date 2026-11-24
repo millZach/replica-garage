@@ -35,7 +35,7 @@ from mathutils import Vector
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _blender as B  # noqa: E402
-from _common import ArgParser, BadInput, EXIT_GATE, EXIT_OK, save_json  # noqa: E402
+from _common import ArgParser, BadInput, EXIT_GATE, EXIT_OK, load_json, save_json  # noqa: E402
 
 USAGE = ('blender -b <scene.blend> --python tools/closeups.py -- --out DIR [--project DIR] [--size-mm 600] '
          '[--mode lit|clay|zebra] [--look NAME] [--hide parts] [--min-coverage 0.95] [--no-render]')
@@ -86,19 +86,50 @@ def plan(lo, hi, size, overlap, lens, res, regions, unit):
     return views, dist, half
 
 
-def sample_surface(objs, n, rng):
-    """Area-weighted points and unit normals over every object's triangles (scene units)."""
-    P, N, A = [], [], []
-    for ob in objs:
-        md = B.MeshData(ob)
-        if not len(md.tris):
+def replay_ring(path, regions, unit, size_mm, overlap, lens):
+    source = load_json(path, 'baseline close-up cameras')
+    src_size = float(source['size_mm'])
+    src_overlap = float(source['overlap'])
+    if size_mm is not None and abs(src_size - size_mm) > 1e-6:
+        raise BadInput('baseline close-up size_mm (%g) differs from requested --size-mm (%g)' % (src_size, size_mm))
+    if overlap is not None and abs(src_overlap - overlap) > 1e-6:
+        raise BadInput('baseline close-up overlap (%g) differs from requested --overlap (%g)' % (src_overlap, overlap))
+    size_mm = src_size if size_mm is None else size_mm
+    overlap = src_overlap if overlap is None else overlap
+    views = []
+    for row in source['views']:
+        if row['region'] not in regions:
             continue
-        nrm, area = md.tri_normals()
-        P.append(md.verts[md.tris])
+        if row['lens_mm'] != lens or row['sensor_mm'] != 36 or row['resolution'][0] != row['resolution'][1]:
+            raise BadInput('baseline close-up intrinsics differ from the requested square-frame camera')
+        views.append(dict(name=row['name'], region=row['region'], centre=np.asarray(row['centre_mm']) / unit,
+                          camera=np.asarray(row['camera_mm']) / unit, direction=np.asarray(row['direction']),
+                          up=np.asarray(row['up'])))
+    if not views or {v['region'] for v in views} != set(regions):
+        raise BadInput('baseline close-up poses do not cover all requested regions')
+    half = math.atan(18.0 / lens)
+    return views, size_mm / (2 * unit * math.tan(half)), half, size_mm, overlap
+
+
+def sample_surface(objs, n, rng, with_owners=False, outer_only=True):
+    """Area-weighted points and unit normals over exterior/outer triangles (scene units)."""
+    P, N, A, owners = [], [], [], []
+    for ob in objs:
+        md = B.MeshData(ob, layers=outer_only)
+        tris = md.outer_tris() if outer_only else md.tris
+        if not len(tris):
+            continue
+        v = md.verts[tris]
+        cr = np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0])
+        area = np.linalg.norm(cr, axis=1) / 2
+        nrm = cr / np.maximum(2 * area, 1e-30)[:, None]
+        P.append(v)
         N.append(nrm)
         A.append(area)
+        owners.append(ob.name)
     if not P:
         raise BadInput('no surface to sample')
+    ends = np.cumsum([len(a) for a in A])
     P, N, A = np.concatenate(P), np.concatenate(N), np.concatenate(A)
     tot = A.sum()
     if tot <= 0:
@@ -108,6 +139,8 @@ def sample_surface(objs, n, rng):
     s = np.sqrt(r1)
     w = np.stack([1 - s, s * (1 - r2), s * r2], 1)
     pts = (P[idx] * w[:, :, None]).sum(1)
+    if with_owners:
+        return pts, N[idx], np.asarray(owners)[np.searchsorted(ends, idx, side='right')]
     return pts, N[idx]
 
 
@@ -130,15 +163,17 @@ def coverage(objs, views, half, regions_measured, n_samples, eps, far):
     sc = B.bpy.context.scene
     dg = B.depsgraph()
     rng = np.random.default_rng(0)
-    pts, nrm = sample_surface(objs, n_samples, rng)
+    pts, nrm, owners = sample_surface(objs, n_samples, rng, with_owners=True, outer_only=True)
     dirs = {'left': (0, -1, 0), 'right': (0, 1, 0), 'front': (-1, 0, 0), 'rear': (1, 0, 0), 'roof': (0, 0, 1)}
     names = list(dirs)
     D = np.array([dirs[k] for k in names], float)
     t = math.tan(half)
     stats = {r: dict(samples=0, exposed=0, covered=0) for r in regions_measured}
+    missed = {r: {} for r in regions_measured}
+    units = B.mm_per_unit()
     cams = [(np.array(v['camera']), np.array(v['direction']), np.array(v['up']), v.get('tan', (t, t)))
             for v in views]
-    for p, n in zip(pts, nrm):
+    for p, n, owner in zip(pts, nrm, owners):
         out_pos = any(escapes(p, d, eps, far) for d in tilt_dirs(n))
         if not out_pos:                 # normals may point inward: try the other side
             n = -n
@@ -174,24 +209,32 @@ def coverage(objs, views, half, regions_measured, n_samples, eps, far):
             if hit and np.linalg.norm(np.array(loc) - p) <= max(10 * eps, 1e-4 * L):
                 st['covered'] += 1
                 break
-    for st in stats.values():
+        else:
+            owner = str(owner)
+            if owner not in missed[reg]:
+                missed[reg][owner] = dict(object=owner, samples=0, example_mm=(p * units).round(2).tolist())
+            missed[reg][owner]['samples'] += 1
+    for region, st in stats.items():
         st['fraction'] = (st['covered'] / st['exposed']) if st['exposed'] else None
+        st['uncovered_by_object'] = sorted(missed[region].values(), key=lambda row: -row['samples'])
     return stats
 
 
 def main(argv):
     ap = ArgParser(usage_line=USAGE)
     ap.add_argument('--out', required=True)
-    ap.add_argument('--size-mm', type=float, default=600.0)
+    ap.add_argument('--size-mm', type=float, default=None)
     ap.add_argument('--resolution', type=int, default=800)
     ap.add_argument('--lens', type=float, default=50.0)
-    ap.add_argument('--overlap', type=float, default=0.25)
+    ap.add_argument('--poses-from', help='replay a saved closeups.json on the current geometry')
+    ap.add_argument('--overlap', type=float, default=None)
     ap.add_argument('--objects')
     ap.add_argument('--regions', default=','.join(REGIONS))
     ap.add_argument('--skip-regions', default='')
     ap.add_argument('--min-coverage', type=float, default=0.95)
     ap.add_argument('--samples-surface', type=int, default=4000)
     ap.add_argument('--no-render', action='store_true')
+    ap.add_argument('--resume', action='store_true', help='skip tiles whose output PNG already exists at the right size')
     B.add_project_arg(ap)
     B.add_render_args(ap)
     B.add_style_args(ap)
@@ -203,7 +246,10 @@ def main(argv):
             raise BadInput('unknown region %r (regions: %s)' % (r, ', '.join(REGIONS)))
     if not regions:
         raise BadInput('no regions')
-    if not (10 <= a.size_mm <= 100000) or not (0 <= a.overlap < 0.9) or a.resolution < 8 or a.lens <= 0:
+    size_mm = 600.0 if (a.size_mm is None and not a.poses_from) else a.size_mm
+    overlap = 0.25 if (a.overlap is None and not a.poses_from) else a.overlap
+    if (size_mm is not None and not (10 <= size_mm <= 100000)) or \
+       (overlap is not None and not (0 <= overlap < 0.9)) or a.resolution < 8 or a.lens <= 0:
         raise BadInput('size, overlap, resolution or lens out of range')
     if a.samples_surface < 10:
         raise BadInput('--samples-surface must be at least 10')
@@ -216,13 +262,16 @@ def main(argv):
     geo = B.visible_geometry(B.globs(a.objects) or None)
     if not geo:
         raise BadInput('no geometry to look at')
+    cov_geo = [ob for ob in geo if ob.get('rg_exterior', True)] or geo
     unit = B.mm_per_unit()
     lo, hi = B.bbox(geo)
-    size = a.size_mm / unit
-    views, dist, half = plan(lo, hi, size, a.overlap, a.lens, a.resolution, [r for r in REGIONS if r not in skip],
-                             unit)
+    planned_regions = [r for r in REGIONS if r not in skip]
+    if a.poses_from:
+        views, dist, half, size_mm, overlap = replay_ring(a.poses_from, planned_regions, unit, size_mm, overlap, a.lens)
+    else:
+        views, dist, half = plan(lo, hi, size_mm / unit, overlap, a.lens, a.resolution, planned_regions, unit)
     far = float(np.linalg.norm(hi - lo)) * 4 + 10 * dist
-    stats = coverage(geo, views, half, regions, a.samples_surface, eps=0.5 / unit, far=far)
+    stats = coverage(cov_geo, views, half, regions, a.samples_surface, eps=0.5 / unit, far=far)
     ok = True
     for r in regions:
         st = stats[r]
@@ -241,20 +290,24 @@ def main(argv):
     rows = []
     for v in views:
         f = None
+        resumed = False
         if not a.no_render:
-            cam = B.look_camera('rg close ' + v['name'], v['camera'], v['centre'], v['up'], a.lens,
-                                (a.resolution, a.resolution))
-            cam.data.sensor_fit = 'HORIZONTAL'
             f = os.path.join(os.path.abspath(a.out), v['name'] + '.png')
-            B.render_to(f)
+            if a.resume and B.valid_image(f, (a.resolution, a.resolution)):
+                resumed = True
+            else:
+                cam = B.look_camera('rg close ' + v['name'], v['camera'], v['centre'], v['up'], a.lens,
+                                    (a.resolution, a.resolution))
+                cam.data.sensor_fit = 'HORIZONTAL'
+                B.render_to(f)
         d = v['direction']
         rows.append(dict(name=v['name'], region=v['region'], centre_mm=(v['centre'] * unit).tolist(),
                          direction=d.tolist(), camera_mm=(v['camera'] * unit).tolist(), up=v['up'].tolist(),
                          lens_mm=a.lens, sensor_mm=36.0, resolution=[a.resolution, a.resolution],
-                         distance_mm=dist * unit, file=f))
+                         distance_mm=dist * unit, file=f, resumed=resumed))
     if not a.no_render:
         B.write_settings(write_to, s, dev)
-    res = dict(size_mm=a.size_mm, overlap=a.overlap, mode=mode, hidden=hidden,
+    res = dict(size_mm=size_mm, overlap=overlap, mode=mode, hidden=hidden, poses_from=a.poses_from,
                render=None if a.no_render else dict(s, look=look),
                regions=regions, skipped_regions=skip, min_coverage=a.min_coverage, coverage=stats, views=rows,
                passed=bool(ok))

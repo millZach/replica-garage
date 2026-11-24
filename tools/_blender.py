@@ -74,6 +74,11 @@ def visible_geometry(include=None, exclude=None):
     return out
 
 
+def exterior_geometry(include=None, exclude=None):
+    """Visible geometry registered as exterior (default True; interior/wheelhouse/underbody pass exterior=False)."""
+    return [ob for ob in visible_geometry(include=include, exclude=exclude) if ob.get('rg_exterior', True)]
+
+
 def find_objects(pattern):
     """Objects whose name equals pattern, or matches it as a glob."""
     sc = bpy.context.scene
@@ -173,6 +178,21 @@ def bbox(objs, dg=None):
     if not np.all(np.isfinite(lo)):
         raise BadInput('no geometry found in the scene')
     return lo, hi
+
+
+def framing_corners(objects):
+    """World-space bounding-box corners of each individual part, for tight camera framing on tapered vehicles."""
+    dg = depsgraph()
+    corners = []
+    for ob in objects:
+        ev = ob.evaluated_get(dg)
+        local_box = np.asarray(ev.bound_box, dtype=float)
+        if not np.all(local_box == -1):
+            world = np.asarray(ev.matrix_world, dtype=float)
+            corners.append(local_box @ world[:3, :3].T + world[:3, 3])
+    if not corners:
+        raise BadInput('no geometry available for camera framing')
+    return np.concatenate(corners)
 
 
 # ------------------------------------------------------------------ rendering
@@ -341,6 +361,23 @@ def _world(name):
     return w, nt, next(n for n in nt.nodes if n.type == 'BACKGROUND')
 
 
+def apply_color_management(finishes, name):
+    """Apply explicit color_management (view_transform, look, exposure) from finishes.json when present."""
+    settings = (finishes or {}).get('looks', {}).get(name, {}).get('color_management')
+    vs = bpy.context.scene.view_settings
+    if settings:
+        try:
+            if 'view_transform' in settings and settings['view_transform']:
+                vs.view_transform = settings['view_transform']
+            if 'look' in settings and settings['look'] is not None:
+                vs.look = settings['look']
+            if 'exposure' in settings and settings['exposure'] is not None:
+                vs.exposure = float(settings['exposure'])
+        except (TypeError, ValueError) as e:
+            raise BadInput('invalid color_management in look %r: %s' % (name, e))
+    return dict(view_transform=vs.view_transform, look=vs.look, exposure=float(vs.exposure))
+
+
 def apply_mode(mode, look, finishes, lo, hi):
     """Prepare the scene for one review mode. Returns a description written into the JSON results."""
     import kit
@@ -355,6 +392,10 @@ def apply_mode(mode, look, finishes, lo, hi):
     info = dict(mode=mode, look=name)
     if mode == 'lit':
         info.update(studio=studio, rig=kit.build_studio(studio, lo, hi), slots_not_in_scene=missing)
+        if (finishes or {}).get('end_fill_watts'):
+            info['end_fill_watts'] = float(finishes['end_fill_watts'])
+            kit.end_fill_cards('rg studio end fill', lo, hi, info['end_fill_watts'])
+        info['color_management'] = apply_color_management(finishes, name)
         return info
     for ob in sc.objects:
         if ob.type == 'LIGHT':
@@ -437,8 +478,34 @@ def apply_style(style, sky, look, finishes, lo, hi):
         name, _, missing = kit.apply_look(finishes, look) if finishes else (None, None, [])
     except KeyError as e:
         raise BadInput(str(e).strip('"'))
-    return dict(mode='lit', look=name, style=style, rig=kit.build_style(style, lo, hi, sky),
-                slots_not_in_scene=missing)
+    stage = (finishes or {}).get('showroom') if style == 'showroom' else None
+    rig = kit.build_style(style, lo, hi, sky, showroom_cards=(stage or {}).get('cards'))
+    if style == 'showroom' and (finishes or {}).get('end_fill_watts'):
+        kit.end_fill_cards('rg showroom end fill', lo, hi, float(finishes['end_fill_watts']))
+    if stage:
+        sc = bpy.context.scene
+        if stage.get('floor'):
+            floor = next((ob.active_material for ob in sc.objects if ob.get('rg_style') and
+                          ob.name.startswith('rg showroom floor')), None)
+            if floor is not None:
+                kit.set_slot(floor, stage['floor'])
+                if 'floor_specular_level' in stage and 'Specular IOR Level' in kit.principled(floor).inputs:
+                    kit.principled(floor).inputs['Specular IOR Level'].default_value = float(
+                        stage['floor_specular_level'])
+        if 'ring_emission' in stage:
+            ring = next((ob.active_material for ob in sc.objects if ob.get('rg_style') and
+                         ob.name.startswith('rg showroom ring')), None)
+            if ring is not None:
+                kit.set_slot(ring, dict(emission_strength=float(stage['ring_emission'])))
+        if stage.get('light_cards_on_vehicle'):
+            receivers = bpy.data.collections.new('rg showroom receivers')
+            for ob in visible_geometry():
+                receivers.objects.link(ob)
+            for light in sc.objects:
+                if light.type == 'LIGHT' and not light.hide_render and light.name.startswith('rg showroom'):
+                    light.light_linking.receiver_collection = receivers
+    return dict(mode='lit', look=name, style=style, rig=rig, slots_not_in_scene=missing,
+                color_management=apply_color_management(finishes, name), stage=stage)
 
 
 def hide_objects(patterns):
@@ -477,6 +544,23 @@ def render_to(path):
     bpy.ops.render.render(write_still=True)
     if not os.path.isfile(path):
         raise RuntimeError('render was not written: %s' % path)
+
+
+def valid_image(path, expected_size=None):
+    """True when `path` is an existing, readable image file matching expected_size (W, H) if given."""
+    if not os.path.isfile(path) or os.path.getsize(path) == 0:
+        return False
+    try:
+        img = bpy.data.images.load(path, check_existing=False)
+    except RuntimeError:
+        return False
+    try:
+        w, h = int(img.size[0]), int(img.size[1])
+        if w <= 0 or h <= 0:
+            return False
+        return expected_size is None or (w, h) == (int(expected_size[0]), int(expected_size[1]))
+    finally:
+        bpy.data.images.remove(img)
 
 
 def alpha_fraction(path):
@@ -533,9 +617,12 @@ def camera_from_view(name, c, scale=1.0):
     big = max(w, h)
     cd.shift_x = ((w - 1) / 2.0 - cx) / big          # shifting the frame right moves the centre pixel left
     cd.shift_y = (cy - (h - 1) / 2.0) / big
-    sc.render.resolution_x = max(1, int(round(w * scale)))
-    sc.render.resolution_y = max(1, int(round(h * scale)))
-    sc.render.pixel_aspect_x = sc.render.pixel_aspect_y = 1.0
+    W = max(1, int(round(w * scale)))
+    H = max(1, int(round(h * scale)))
+    sc.render.resolution_x = W
+    sc.render.resolution_y = H
+    sc.render.pixel_aspect_x = 1.0
+    sc.render.pixel_aspect_y = 1.0 if (W == w and H == h) else (h / float(w)) * (W / float(H))
     sc.camera = ob
     return ob
 

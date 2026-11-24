@@ -71,10 +71,16 @@ def resample(P, closed, n):
 
 def edge_points(objs, n_points, group, all_loops):
     chains = []
+    source = group or 'open_border'
+    effective_group = group
+    if not effective_group:
+        if any('rg_seat' in ob.vertex_groups for ob in objs):
+            effective_group = 'rg_seat'
+            source = 'rg_seat'
     for ob in objs:
-        md = B.MeshData(ob, layers=bool(group))
-        if group:
-            g = getattr(md, 'vgroups', {}).get(group)
+        md = B.MeshData(ob, layers=bool(effective_group))
+        if effective_group:
+            g = getattr(md, 'vgroups', {}).get(effective_group)
             if not g:
                 continue
             edges = [tuple(e) for e in md.edges if e[0] in g and e[1] in g]
@@ -84,11 +90,12 @@ def edge_points(objs, n_points, group, all_loops):
             P = md.verts[c + ([c[0]] if cl else [])]
             chains.append((md.verts[c], cl, float(np.linalg.norm(np.diff(P, axis=0), axis=1).sum())))
     if not chains:
-        return None
+        return None, source
     use = chains if all_loops else [max(chains, key=lambda c: c[2])]
     total = sum(c[2] for c in use)
-    return np.concatenate([resample(P, cl, max(4, int(round(n_points * L / total))) if total > 0 else n_points)
-                           for P, cl, L in use])
+    pts = np.concatenate([resample(P, cl, max(4, int(round(n_points * L / total))) if total > 0 else n_points)
+                          for P, cl, L in use])
+    return pts, source
 
 
 def panel_tree(objs):
@@ -107,10 +114,11 @@ def seat(part, on, a, u):
         row.update(max_abs_step_mm=None, passed=False,
                    note='%s is not in the scene' % (('part %r' % part) if not pobs else ('panel %r' % on)))
         return row
-    pts = edge_points(pobs, a.points, a.edge_group, a.all_loops)
+    pts, source = edge_points(pobs, a.points, a.edge_group, a.all_loops)
+    row['edge_source'] = source
     if pts is None:
-        row.update(max_abs_step_mm=None, passed=False, note='part %r has no open edge; name it with --edge-group'
-                   % part)
+        row.update(max_abs_step_mm=None, passed=False,
+                   note='part %r has no open edge; mark it with ctx.seat_edge (rg_seat) or --edge-group' % part)
         return row
     bvh = panel_tree(nobs)
     if bvh is None:

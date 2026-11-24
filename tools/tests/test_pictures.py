@@ -219,3 +219,55 @@ def test_mask_photo_seed_without_opencv(project, tmp_path):
     assert res['segmentation'] == 'colour model'
     m = np.asarray(Image.open(project / 'refs' / 'masks' / 'busy.png')) > 127
     assert (m ^ (np.asarray(silhouette()) > 127)).mean() < 0.03
+
+
+def test_mask_photo_drawing_close_px_bridges_dashed_lines(project):
+    """A drawing with a dashed outline leaks flood-fill unless --close-px bridges the dashes."""
+    sheet = Image.new('RGB', (W, H), (255, 255, 255))
+    d = ImageDraw.Draw(sheet)
+    # Dashed rectangle: 8 px dashes separated by 4 px gaps
+    for x in range(80, 320, 12):
+        d.line([(x, 80), (min(x + 7, 320), 80)], fill=(0, 0, 0), width=2)
+        d.line([(x, 180), (min(x + 7, 320), 180)], fill=(0, 0, 0), width=2)
+    for y in range(80, 180, 12):
+        d.line([(80, y), (80, min(y + 7, 180))], fill=(0, 0, 0), width=2)
+        d.line([(320, y), (320, min(y + 7, 180))], fill=(0, 0, 0), width=2)
+    sheet.save(project / 'refs' / 'photos' / 'dashed.png')
+    landmarks(project, [('dashed', 'refs/photos/dashed.png', 'drawing', None)])
+    r_plain = run_tool('mask_photo.py', 'dashed', '--project', project)
+    m_plain = np.asarray(Image.open(project / 'refs' / 'masks' / 'dashed.png')) > 127
+    assert not m_plain[130, 200]                     # leaked through the dashes
+    r_close = run_tool('mask_photo.py', 'dashed', '--project', project, '--close-px', 4)
+    assert r_close.returncode == 0, r_close.stdout + r_close.stderr
+    m_close = np.asarray(Image.open(project / 'refs' / 'masks' / 'dashed.png')) > 127
+    assert m_close[130, 200] and not m_close[30, 200]
+    assert read_json(project / 'refs' / 'masks' / 'dashed.json')['close_px'] == 4
+
+
+def test_compare_fills_internal_holes_and_honors_ignore_mask(project):
+    """Transparent windows/spokes inside the render silhouette are filled by default; -ignore.png excludes regions."""
+    rd = setup_compare(project, shift=0)
+    # Punch a large transparent window hole inside the render alpha
+    ren = np.asarray(render_of(silhouette())).copy()
+    ren[120:160, 150:250, 3] = 0
+    Image.fromarray(ren, 'RGBA').save(rd / 'side.png')
+    # Default: fills holes -> passes
+    r_fill = compare(project, rd, '--ref-width', W)
+    assert r_fill.returncode == 0, r_fill.stdout + r_fill.stderr
+    assert read_json(project / 'evidence' / 'round-01' / 'outline.json')['views']['side']['p95_px'] <= 1.5
+    # --keep-holes: inner hole contour creates large error -> fails
+    r_holes = compare(project, rd, '--ref-width', W, '--keep-holes')
+    assert r_holes.returncode == 1
+    assert read_json(project / 'evidence' / 'round-01' / 'outline.json')['views']['side']['p95_px'] > 10.0
+
+    # Now add a protruding mismatched lobe above the bonnet, then ignore that box via side-ignore.png
+    ren2 = np.asarray(render_of(silhouette())).copy()
+    ren2[70:115, 70:130, 3] = 255
+    Image.fromarray(ren2, 'RGBA').save(rd / 'side.png')
+    assert compare(project, rd, '--ref-width', W).returncode == 1
+    ign = Image.new('L', (W, H), 0)
+    ImageDraw.Draw(ign).rectangle([65, 65, 135, 120], fill=255)
+    ign.save(project / 'refs' / 'masks' / 'side-ignore.png')
+    r_ign = compare(project, rd, '--ref-width', W)
+    assert r_ign.returncode == 0, r_ign.stdout + r_ign.stderr
+    assert read_json(project / 'evidence' / 'round-01' / 'outline.json')['views']['side']['ignore_mask'] is not None

@@ -10,8 +10,11 @@ from _common import BadInput
 DIMENSIONS = ('length', 'width', 'height', 'wheelbase', 'track_front', 'track_rear', 'overhang_front',
               'tyre_diameter_front', 'tyre_diameter_rear', 'tyre_width_front', 'tyre_width_rear',
               'rim_diameter_front', 'rim_diameter_rear')
-STUDIOS = ('soft', 'gloss', 'dark-paint')
-SETTINGS_NUMBERS = ('metallic', 'roughness', 'coat', 'coat_roughness', 'transmission', 'ior', 'emission_strength')
+STUDIOS = ('soft', 'gloss', 'dark-paint', 'interior')
+SURFACES = ('leather', 'perforated', 'brushed', 'carbon', 'fabric', 'rubber')
+SETTINGS_NUMBERS = ('metallic', 'roughness', 'coat', 'coat_roughness', 'transmission', 'ior', 'emission_strength',
+                    'specular_ior_level', 'anisotropic', 'sheen', 'sheen_roughness', 'bump_strength',
+                    'bump_scale_mm')
 SETTINGS_COLOURS = ('base_color', 'emission')
 
 
@@ -128,12 +131,29 @@ def cameras(d, name='cameras.json'):
     return d['cameras']
 
 
+def _check_cm(cm, where):
+    if not isinstance(cm, dict):
+        raise BadInput('%s: color_management must be a JSON object' % where)
+    if 'view_transform' in cm and not isinstance(cm['view_transform'], str):
+        raise BadInput('%s: color_management.view_transform must be a string' % where)
+    if 'look' in cm and cm['look'] is not None and not isinstance(cm['look'], str):
+        raise BadInput('%s: color_management.look must be a string' % where)
+    if 'exposure' in cm and cm['exposure'] is not None:
+        _num(cm['exposure'], '%s: color_management.exposure' % where)
+
+
 def finishes(d, name='finishes.json'):
     _need(d, ('proof_look', 'looks'), name)
     if 'style' in d and d['style'] not in ('showroom', 'studio', 'daylight'):
         raise BadInput('%s: style must be showroom, studio or daylight' % name)
     if 'sky' in d and not isinstance(d['sky'], str):
         raise BadInput('%s: sky must be the path of an image under refs/' % name)
+    if 'end_fill_watts' in d and d['end_fill_watts'] is not None:
+        _num(d['end_fill_watts'], '%s: end_fill_watts' % name)
+    if 'showroom' in d and d['showroom'] is not None and not isinstance(d['showroom'], dict):
+        raise BadInput('%s: showroom must be a JSON object' % name)
+    if 'color_management' in d and d['color_management'] is not None:
+        _check_cm(d['color_management'], name)
     if not isinstance(d['looks'], dict) or not d['looks']:
         raise BadInput('%s: "looks" must be a non-empty object' % name)
     if d['proof_look'] not in d['looks']:
@@ -143,12 +163,16 @@ def finishes(d, name='finishes.json'):
         _need(look, ('studio', 'slots'), where)
         if look['studio'] not in STUDIOS:
             raise BadInput('%s: studio must be one of %s' % (where, ', '.join(STUDIOS)))
+        if 'color_management' in look and look['color_management'] is not None:
+            _check_cm(look['color_management'], where)
         if not isinstance(look['slots'], dict):
             raise BadInput('%s: "slots" must be an object of slot: settings' % where)
         for slot, st in look['slots'].items():
             sw = '%s slot %r' % (where, slot)
             if not isinstance(st, dict):
                 raise BadInput('%s must be an object of settings' % sw)
+            if 'surface' in st and st['surface'] is not None and st['surface'] not in SURFACES:
+                raise BadInput('%s: surface must be one of %s' % (sw, ', '.join(SURFACES)))
             for k in SETTINGS_NUMBERS:
                 if k in st:
                     _num(st[k], '%s: %s' % (sw, k))
@@ -220,4 +244,39 @@ def marks(d, name='marks.json'):
             raise BadInput('%s: shape must be box, ellipse or outline' % where)
         for p in _list(m['points'], where + ': points'):
             _vec(p, 2, where + ': points')
+    return d
+
+
+def details(d, name='details.json'):
+    seen = set()
+    for i, e in enumerate(_list(d, name)):
+        where = '%s entry %d' % (name, i + 1)
+        _need(e, ('name', 'camera_mm', 'target_mm'), where)
+        where = '%s view %r' % (name, e['name'])
+        if e['name'] in seen:
+            raise BadInput('%s is listed twice' % where)
+        seen.add(e['name'])
+        _vec(e['camera_mm'], 3, where + ': camera_mm')
+        _vec(e['target_mm'], 3, where + ': target_mm')
+        if 'up' in e and e['up'] is not None:
+            _vec(e['up'], 3, where + ': up')
+        if 'lens_mm' in e and e['lens_mm'] is not None:
+            _num(e['lens_mm'], where + ': lens_mm')
+        if 'resolution' in e and e['resolution'] is not None:
+            _vec(e['resolution'], 2, where + ': resolution')
+        if 'lighting' in e and e['lighting'] is not None and e['lighting'] not in ('style', 'studio', 'interior',
+                                                                                  'strip-sweep'):
+            raise BadInput('%s: lighting must be style, studio, interior or strip-sweep' % where)
+        if 'hide' in e and e['hide'] is not None and not isinstance(e['hide'], list):
+            raise BadInput('%s: hide must be a list of part patterns' % where)
+        if 'strip_angles_deg' in e and e['strip_angles_deg'] is not None:
+            for a in _list(e['strip_angles_deg'], where + ': strip_angles_deg'):
+                _num(a, where + ': strip_angles_deg')
+        if 'targets_mm' in e and e['targets_mm'] is not None:
+            if not isinstance(e['targets_mm'], dict):
+                raise BadInput('%s: targets_mm must be an object of label: [x, y, z]' % where)
+            for k, v in e['targets_mm'].items():
+                _vec(v, 3, '%s: targets_mm.%s' % (where, k))
+    if not d:
+        raise BadInput('%s has no views' % name)
     return d

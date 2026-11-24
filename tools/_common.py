@@ -295,6 +295,7 @@ DEFAULT_LIMITS = {
     'outline_ref_width_px': 1600.0,
     'fairness_p99_deg': 2.5,
     'fairness_max_deg': 5.0,
+    'fairness_wave_mm': 1.0,
     'seating_step_mm': 3.0,
     'double_skin_count': 0,
     'separation_overlap_mm': 0.5,

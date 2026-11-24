@@ -42,13 +42,24 @@ import numpy as np
 from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 
-PROPS = ('rg_assembly', 'rg_part', 'rg_panel', 'rg_separable', 'rg_steer')
+PROPS = ('rg_assembly', 'rg_part', 'rg_panel', 'rg_separable', 'rg_steer', 'rg_exterior')
 CREASE = 'rg_crease'
 INNER = 'rg_inner'
+SEAT_GROUP = 'rg_seat'
 PRINCIPLED = {'base_color': 'Base Color', 'metallic': 'Metallic', 'roughness': 'Roughness', 'coat': 'Coat Weight',
               'coat_roughness': 'Coat Roughness', 'transmission': 'Transmission Weight', 'ior': 'IOR',
-              'emission': 'Emission Color', 'emission_strength': 'Emission Strength'}
-STUDIOS = ('soft', 'gloss', 'dark-paint')
+              'emission': 'Emission Color', 'emission_strength': 'Emission Strength',
+              'specular_ior_level': 'Specular IOR Level', 'anisotropic': 'Anisotropic',
+              'sheen': 'Sheen Weight', 'sheen_roughness': 'Sheen Roughness'}
+STUDIOS = ('soft', 'gloss', 'dark-paint', 'interior')
+SURFACE_DEFAULTS = {
+    'leather': dict(kind='noise', scale_mm=1.8, strength=0.08, distance=0.0004, detail=6.0, roughness=0.65),
+    'perforated': dict(kind='voronoi', scale_mm=3.5, strength=0.22, distance=0.0008, randomness=0.05),
+    'brushed': dict(kind='brushed', scale_mm=6.0, strength=0.05, distance=0.0002, detail=8.0, roughness=0.6),
+    'carbon': dict(kind='wave', scale_mm=3.0, strength=0.06, distance=0.0002),
+    'fabric': dict(kind='noise', scale_mm=1.2, strength=0.10, distance=0.0004, detail=8.0, roughness=0.75),
+    'rubber': dict(kind='noise', scale_mm=2.5, strength=0.06, distance=0.0003, detail=6.0, roughness=0.6),
+}
 
 
 def mm_per_unit():
@@ -79,8 +90,67 @@ def principled(mat):
     return b
 
 
+def _apply_surface(mat, b, settings):
+    """Build or clear procedural Object-coordinate micro-surface bump nodes on a slot material."""
+    nt = mat.node_tree
+    for n in [x for x in nt.nodes if x.name.startswith('rg_surface_')]:
+        nt.nodes.remove(n)
+    surf = settings.get('surface')
+    has_bump = surf is not None or settings.get('bump_strength') is not None
+    if not has_bump or 'Normal' not in b.inputs:
+        return
+    cfg = dict(SURFACE_DEFAULTS.get(surf or 'leather', SURFACE_DEFAULTS['leather']))
+    scale_mm = float(settings.get('bump_scale_mm', cfg['scale_mm']))
+    strength = float(settings.get('bump_strength', cfg['strength']))
+    if strength <= 0.0 or scale_mm <= 0.0:
+        return
+    scale = 1000.0 / scale_mm                # Object coordinates are in scene metres
+    N, L = nt.nodes, nt.links
+    tc = N.new('ShaderNodeTexCoord')
+    tc.name = 'rg_surface_coord'
+    vec_out = tc.outputs['Object']
+    if cfg['kind'] == 'brushed':
+        mp = N.new('ShaderNodeMapping')
+        mp.name = 'rg_surface_map'
+        mp.inputs['Scale'].default_value = (1.0, 18.0, 1.0)
+        L.new(vec_out, mp.inputs['Vector'])
+        vec_out = mp.outputs['Vector']
+    if cfg['kind'] == 'voronoi':
+        tx = N.new('ShaderNodeTexVoronoi')
+        tx.name = 'rg_surface_tex'
+        tx.inputs['Scale'].default_value = scale
+        if 'Randomness' in tx.inputs:
+            tx.inputs['Randomness'].default_value = cfg.get('randomness', 0.05)
+        L.new(vec_out, tx.inputs['Vector'])
+        height_out = tx.outputs['Distance']
+    elif cfg['kind'] == 'wave':
+        tx = N.new('ShaderNodeTexWave')
+        tx.name = 'rg_surface_tex'
+        tx.wave_type = 'BANDS'
+        tx.bands_direction = 'DIAGONAL'
+        tx.inputs['Scale'].default_value = scale
+        L.new(vec_out, tx.inputs['Vector'])
+        height_out = tx.outputs['Fac']
+    else:
+        tx = N.new('ShaderNodeTexNoise')
+        tx.name = 'rg_surface_tex'
+        tx.inputs['Scale'].default_value = scale
+        if 'Detail' in tx.inputs:
+            tx.inputs['Detail'].default_value = cfg.get('detail', 6.0)
+        if 'Roughness' in tx.inputs:
+            tx.inputs['Roughness'].default_value = cfg.get('roughness', 0.6)
+        L.new(vec_out, tx.inputs['Vector'])
+        height_out = tx.outputs['Fac']
+    bump = N.new('ShaderNodeBump')
+    bump.name = 'rg_surface_bump'
+    bump.inputs['Strength'].default_value = min(1.0, strength)
+    bump.inputs['Distance'].default_value = cfg.get('distance', 0.0004)
+    L.new(height_out, bump.inputs['Height'])
+    L.new(bump.outputs['Normal'], b.inputs['Normal'])
+
+
 def set_slot(mat, settings):
-    """Write one slot's settings into a material's Principled BSDF."""
+    """Write one slot's settings into a material's Principled BSDF, plus optional procedural micro-surface."""
     b = principled(mat)
     for k, v in settings.items():
         inp = PRINCIPLED.get(k)
@@ -92,6 +162,7 @@ def set_slot(mat, settings):
                 mat.diffuse_color = b.inputs[inp].default_value
         else:
             b.inputs[inp].default_value = float(v)
+    _apply_surface(mat, b, settings)
 
 
 def look_of(finishes, name=None):
@@ -144,6 +215,17 @@ def _light(name, kind, energy, loc, target, size=1.0, size_y=None, color=(1, 1, 
     except AttributeError:
         pass
     return ob
+
+
+def end_fill_cards(label, lo, hi, watts):
+    """Offset end cards give recessed front and rear lamps, grilles and diffusers a soft frontal source."""
+    lo, hi = np.asarray(lo, float), np.asarray(hi, float)
+    centre = (lo + hi) / 2
+    length, width, height = hi - lo
+    for side, x in ((-1, lo[0]), (1, hi[0])):
+        location = (x + side * 0.56 * length, centre[1] - side * 0.68 * width, lo[2] + 1.37 * height)
+        target = (x, centre[1], lo[2] + 0.48 * height)
+        _light(label, 'AREA', float(watts), location, target, size=1.33 * width, size_y=1.12 * height)
 
 
 def _world(name, top, horizon, bottom, band_deg=10.0):
@@ -209,7 +291,7 @@ def build_studio(preset, lo, hi):
             _light('rg gloss card', 'AREA', 300 * L * H, (c[0], c[1] + s * r, lo[2] + 0.8 * H), tgt,
                    size=L * 1.3, size_y=H * 0.25)
         desc = 'gloss: dark world, three thin strips overhead and a card each side, hard-edged for paint to mirror'
-    else:
+    elif preset == 'dark-paint':
         _world('rg studio dark-paint', (0.12, 0.12, 0.12), (0.9, 0.9, 0.9), (0.05, 0.05, 0.05), band_deg=12.0)
         for s in (-1, 1):
             _light('rg wall side', 'AREA', 700 * L * H, (c[0], c[1] + s * r, lo[2] + H), tgt, size=L * 2,
@@ -218,6 +300,13 @@ def build_studio(preset, lo, hi):
             _light('rg wall end', 'AREA', 500 * W * H, (c[0] + s * r, c[1], lo[2] + H), tgt, size=W * 2.5,
                    size_y=H * 3)
         desc = 'dark-paint: lit horizon band in the world and large lit walls on four sides'
+    else:
+        _world('rg studio interior', (0.28, 0.28, 0.29), (0.22, 0.22, 0.23), (0.10, 0.10, 0.11))
+        _light('rg interior key', 'AREA', 36 * max(L, 1.0), (c[0] + 0.05 * L, c[1] + 0.55 * W, hi[2] + 0.45 * H),
+               (c[0], c[1], lo[2] + 0.55 * H), size=0.9 * L, size_y=0.7 * W)
+        _light('rg interior fill', 'AREA', 22 * max(L, 1.0), (c[0] - 0.15 * L, c[1] - 0.65 * W, lo[2] + 0.95 * H),
+               (c[0], c[1], lo[2] + 0.50 * H), size=0.8 * L, size_y=0.5 * H)
+        desc = 'interior: gentle ambient dome plus two cabin-scale softboxes for upholstery, gauges and switchgear'
     return desc
 
 
@@ -283,7 +372,7 @@ def _bowl(radius, wall, n=64, rings=8):
     return verts, faces
 
 
-def build_style(style, lo, hi, sky=None):
+def build_style(style, lo, hi, sky=None, showroom_cards=None):
     """Light and surround the vehicle (bounds lo, hi in scene units) in a presentation style, for orbit.py and
     closeups.py --style. Separate from the evidence studios: a style adds a floor or backdrop to the picture.
 
@@ -310,17 +399,27 @@ def build_style(style, lo, hi, sky=None):
         return ob
 
     if style == 'showroom':
+        cards = showroom_cards or {}
+        lift = float(cards.get('lift_m', 0.0))
         _world('rg style showroom', (0.004, 0.004, 0.004), (0.01, 0.01, 0.01), (0.002, 0.002, 0.002))
         place(_style_object('rg showroom floor', *_disc(big), _style_material(
             'rg showroom floor', base_color=[0.015, 0.015, 0.016], roughness=0.12, coat=1.0, coat_roughness=0.05)))
         place(_style_object('rg showroom ring', *_ring(half * 1.25, half * 1.32), _style_material(
             'rg showroom ring', base_color=[0, 0, 0], emission=[1.0, 0.97, 0.92], emission_strength=6.0)))
         for i, f in enumerate((-0.32, 0.0, 0.32)):
-            _light('rg showroom card %d' % i, 'AREA', 350 * L, (c[0] + f * L, c[1], hi[2] + 1.6 * H), tgt,
-                   size=W * 1.2, size_y=L * 0.12)
+            _light('rg showroom card %d' % i, 'AREA', 350 * L * float(cards.get('overhead_power', 1.0)),
+                   (c[0] + f * L, c[1], hi[2] + 1.6 * H + lift), tgt,
+                   size=W * 1.2, size_y=L * 0.12 * float(cards.get('overhead_width', 1.0)))
         for s in (-1, 1):
-            _light('rg showroom side', 'AREA', 120 * L * H, (c[0], c[1] + s * half * 2.2, lo[2] + 1.2 * H), tgt,
-                   size=L * 1.2, size_y=H * 0.2)
+            _light('rg showroom side', 'AREA', 120 * L * H * float(cards.get('side_power', 1.0)),
+                   (c[0], c[1] + s * half * 2.2, lo[2] + 1.2 * H + 0.5 * lift), tgt,
+                   size=L * 1.2, size_y=H * 0.2 * float(cards.get('side_width', 1.0)))
+            fill = cards.get('wheel_fill')
+            if fill:
+                _light('rg showroom wheel fill', 'AREA', float(fill['watts']),
+                       (c[0], c[1] + s * float(fill['offset_m']), lo[2] + float(fill['height_m'])),
+                       (c[0], c[1] + s * float(fill['aim_offset_m']), lo[2] + float(fill['aim_height_m'])),
+                       size=float(fill['width_m']), size_y=float(fill['short_side_m']))
         desc = 'showroom: dark room, dark glossy floor, three lit cards overhead, a lit ring on the floor'
     elif style == 'studio':
         _world('rg style studio', (0.85, 0.85, 0.85), (0.8, 0.8, 0.8), (0.7, 0.7, 0.7))
@@ -480,6 +579,7 @@ class Context:
         self.parts = {p['part']: p for p in (parts or []) if isinstance(p, dict) and 'part' in p}
         self.assembly = None
         self.body = BodySurface()
+        self.interfaces = {}
         self.warnings = []
         self.added = {}
 
@@ -496,7 +596,7 @@ class Context:
             return [v * k for v in value]
         return value * k
 
-    def add(self, obj, part=None, panel=False, separable=False, pivot=None):
+    def add(self, obj, part=None, panel=False, separable=False, pivot=None, exterior=True):
         """Register an object as part of the calling assembly, linking it into the scene if it is not yet.
 
         obj        a Blender object (usually a mesh) you made in build(ctx).
@@ -509,8 +609,10 @@ class Context:
         pivot      [x, y, z] in millimetres, vehicle coordinates: the hinge or hub the part turns about. The
                    object's origin is moved there without moving its geometry. Pass the one from parts.json:
                    ctx.add(door, part="door_l", separable=True, pivot=ctx.part("door_l")["pivot"]).
+        exterior   True for outer surfaces counted by closeups.py and orbit.py exterior coverage; pass False
+                   for cabin, wheelhouse-liner, internal-brake, engine-bay and hidden-underbody parts.
 
-        Recorded on the object as custom properties rg_assembly, rg_part, rg_panel and rg_separable.
+        Recorded on the object as custom properties rg_assembly, rg_part, rg_panel, rg_separable and rg_exterior.
         Returns obj.
         """
         if self.assembly is None:
@@ -526,6 +628,7 @@ class Context:
         obj['rg_part'] = part or obj.name
         obj['rg_panel'] = bool(panel)
         obj['rg_separable'] = bool(separable)
+        obj['rg_exterior'] = bool(exterior)
         if pivot is not None:
             self._set_pivot(obj, pivot)
         self.added.setdefault(self.assembly, []).append(obj.name)
@@ -617,6 +720,44 @@ class Context:
         if side not in ('left', 'right'):
             raise ValueError('side must be "left" or "right"')
         obj['rg_steer'] = side
+
+    def seat_edge(self, obj, verts, group=SEAT_GROUP):
+        """Mark the vertices of a closed or thickened mesh's mating edge in vertex group `rg_seat`, so seating.py
+        measures the real attachment rim automatically without needing an open border."""
+        vg = obj.vertex_groups.get(group) or obj.vertex_groups.new(name=group)
+        vg.add([int(v) for v in verts], 1.0, 'REPLACE')
+        return vg
+
+    def publish_interface(self, name, data, meta=None):
+        """Publish a named aperture, mating boundary (list of [x, y, z] in mm) or geometric contract dict
+        for downstream assemblies. Persisted in the scene's rg_interfaces JSON property and ctx.interface(name)."""
+        if isinstance(data, dict):
+            entry = dict(data)
+            entry.setdefault('assembly', self.assembly)
+            if meta is not None:
+                entry['meta'] = meta
+        else:
+            pts = [[float(c) for c in p] for p in data]
+            if any(len(p) != 3 for p in pts):
+                raise ValueError('interface %r points must each be [x, y, z] in mm' % name)
+            entry = dict(assembly=self.assembly, points_mm=pts)
+            if meta is not None:
+                entry['meta'] = meta
+        self.interfaces[str(name)] = entry
+        bpy.context.scene['rg_interfaces'] = json.dumps(self.interfaces)
+        return entry
+
+    def interface(self, name):
+        """Read a published aperture or mating boundary from an earlier assembly: {"assembly", "points_mm", ...}."""
+        if name in self.interfaces:
+            return self.interfaces[name]
+        raw = bpy.context.scene.get('rg_interfaces')
+        if raw:
+            loaded = json.loads(raw)
+            if name in loaded:
+                self.interfaces[name] = loaded[name]
+                return loaded[name]
+        raise KeyError('interface %r has not been published by an earlier assembly' % name)
 
     def part(self, name):
         """The data/parts.json entry for a part that comes off: {"part", "fixed_to", "pivot" (mm), "level",

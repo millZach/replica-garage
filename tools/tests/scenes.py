@@ -185,4 +185,53 @@ for name, mark in (('hem', True), ('hem_bad', False)):
     if mark:
         ctx.inner(ob, not_skin)
     save(name)
+
+
+# wave_bad: one clean tight-radius curved panel (passes), and one finely subdivided panel with a smooth
+# localized S-ripple whose adjacent-face dihedral angle is under 5 deg yet wave_mm exceeds 1.0 mm.
+def wave_panel(name, n=70, size=0.8, amp=0.0028, wavelength=0.12, x_off=0.0):
+    verts, faces = [], []
+    cx, cy = size / 2.0, size / 2.0
+    for i in range(n + 1):
+        for j in range(n + 1):
+            u, v = size * i / n, size * j / n
+            env = math.exp(-((u - cx) ** 2 + (v - cy) ** 2) / (2 * 0.11 ** 2))
+            z = amp * math.sin(2.0 * math.pi * (u - cx) / wavelength) * env
+            verts.append((u + x_off, v, z))
+    for i in range(n):
+        for j in range(n):
+            a = i * (n + 1) + j
+            faces.append((a, a + n + 1, a + n + 2, a + 1))
+    return mesh_object(name, verts, faces)
+
+
+ctx = empty_scene()
+p_curve, _ = grid_panel('panel_curved', n=50, size=0.6, radius=0.45, x_off=0.0)
+register(ctx, 'body', p_curve, 'body', panel=True)
+p_wave = wave_panel('panel_dented', x_off=1.5)
+register(ctx, 'body', p_wave, 'body', panel=True)
+save('wave_bad')
+
+# cabin: exterior open-top body_shell + removable roof enclosing interior seat & dash (exterior=False)
+ctx = empty_scene()
+tub_v = [(x, y, z) for x in (-0.9, 3.3) for y in (-0.9, 0.9) for z in (0.15, 1.15)]
+tub_f = [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4)]
+register(ctx, 'body', mesh_object('body_shell', tub_v, tub_f), 'body', part='body_shell', panel=True, exterior=True)
+register(ctx, 'body', box('roof', -0.9, 3.3, -0.9, 0.9, 1.15, 1.30), 'body', part='roof', panel=True,
+         exterior=True)
+register(ctx, 'interior', box('seat', 1.1, 1.6, -0.4, 0.4, 0.25, 0.85), 'seat', part='seat', exterior=False)
+register(ctx, 'interior', box('dash', 0.4, 0.7, -0.6, 0.6, 0.55, 0.95), 'trim', part='dash', exterior=False)
+save('cabin')
+
+# seat_closed: bumper opening with a closed solid lamp whose front perimeter is marked with ctx.seat_edge
+ctx = empty_scene()
+o, i = 0.5, 0.2
+verts = [(-o, -o, 0), (o, -o, 0), (o, o, 0), (-o, o, 0), (-i, -i, 0), (i, -i, 0), (i, i, 0), (-i, i, 0)]
+register(ctx, 'body', mesh_object('bumper skin', verts, [(0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]),
+         'body', part='bumper', panel=True)
+lamp = box('lamp_closed', -0.199, 0.199, -0.199, 0.199, -0.04, 0.002)
+register(ctx, 'front', lamp, 'lens', part='lamp_closed')
+top_verts = [v.index for v in lamp.data.vertices if v.co.z > 0.0]
+ctx.seat_edge(lamp, top_verts)
+save('seat_closed')
 print('SCENES DONE')

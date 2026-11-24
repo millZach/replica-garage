@@ -68,3 +68,55 @@ def test_gates_count_a_part_not_built_as_information(project):
     r = run_tool('gates.py', rnd, '--skip', 'cameras,dimensions,outline,fairness,seating,double_skin')
     assert r.returncode == 0, r.stdout + r.stderr
     assert read_json(rnd / 'gates.json')['summary']['separation'] == 'pass'
+
+
+def test_finishes_extended_settings_and_surface():
+    valid = {
+        'proof_look': 'cabin',
+        'end_fill_watts': 40,
+        'showroom': {'card_watts': 300, 'floor_roughness': 0.12},
+        'color_management': {'view_transform': 'AgX', 'look': 'None', 'exposure': 0.1},
+        'looks': {
+            'cabin': {
+                'studio': 'interior',
+                'color_management': {'view_transform': 'AgX', 'exposure': -0.2},
+                'slots': {
+                    'seat': {'base_color': [0.05, 0.05, 0.06], 'roughness': 0.55, 'sheen': 0.2,
+                             'sheen_roughness': 0.5, 'surface': 'leather', 'bump_strength': 0.12,
+                             'bump_scale_mm': 2.0},
+                    'insert': {'base_color': [0.04, 0.04, 0.04], 'surface': 'perforated'},
+                    'trim': {'base_color': [0.5, 0.5, 0.5], 'metallic': 1.0, 'anisotropic': 0.6,
+                             'specular_ior_level': 0.5, 'surface': 'brushed'},
+                    'weave': {'surface': 'carbon'},
+                    'carpet': {'surface': 'fabric'},
+                    'tyre': {'surface': 'rubber'},
+                },
+            }
+        },
+    }
+    F.finishes(valid)
+    bad = dict(valid, looks={'cabin': {'studio': 'interior', 'slots': {'seat': {'surface': 'velvet'}}}})
+    with pytest.raises(BadInput, match='surface must be one of'):
+        F.finishes(bad)
+    bad_cm = dict(valid, color_management={'exposure': 'high'})
+    with pytest.raises(BadInput, match='color_management.exposure'):
+        F.finishes(bad_cm)
+
+
+def test_details_format():
+    valid = [
+        {'name': 'cabin_34', 'camera_mm': [1200, -1400, 1200], 'target_mm': [1400, 0, 750],
+         'lens_mm': 35, 'resolution': [800, 600], 'lighting': 'interior', 'hide': ['roof', 'glass*'],
+         'denoise': False, 'toggle_part': 'steering_wheel', 'targets_mm': {'cluster': [900, -350, 780]}},
+        {'name': 'quarter_strip', 'camera_mm': [2200, -2500, 950], 'target_mm': [2100, -850, 700],
+         'lighting': 'strip-sweep', 'strip_angles_deg': [-20, 0, 20]},
+    ]
+    F.details(valid)
+    with pytest.raises(BadInput, match='has no views'):
+        F.details([])
+    with pytest.raises(BadInput, match="missing key 'target_mm'"):
+        F.details([{'name': 'a', 'camera_mm': [0, 0, 0]}])
+    with pytest.raises(BadInput, match='listed twice'):
+        F.details([valid[0], dict(valid[0])])
+    with pytest.raises(BadInput, match='lighting must be'):
+        F.details([dict(valid[0], lighting='neon')])

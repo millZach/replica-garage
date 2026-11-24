@@ -7,16 +7,19 @@ usage when run with no arguments.
 | Tool | Runs in | For |
 |---|---|---|
 | `solve_cameras.py` | Python | Solve each photo's camera (and each drawing's flat camera) from known points, grade each view, triangulate a feature. |
-| `mask_photo.py` | Python | Make a view's silhouette mask: plain background, drawing, or seeded from a render. |
+| `mask_photo.py` | Python | Make a view's silhouette mask: plain background, drawing (with optional `--close-px`), or seeded from a render. |
+| `accept.py` | Python | Freeze an accepted assembly under `accepted/<assembly>/NN/`, write its SHA-256 manifest, and update `build.json` lists. |
 | `assemble.py` | Blender | Build the vehicle from the accepted, hash-checked modules in build order. |
 | `render_views.py` | Blender | Render the model through every solved camera (lit, clay or zebra) at the picture's size and steering angle. |
-| `compare.py` | Python | Board each picture beside its render and measure how far apart the silhouettes are. |
+| `compare.py` | Python | Board each picture beside its render and measure how far apart the silhouettes are (filling internal transparent holes by default). |
 | `dimensions.py` | Blender | Measure length, width, height, wheelbase, tracks and overhang against the maker's figures. |
-| `closeups.py` | Blender | Render the close-up ring over both sides, front, rear and roof, and prove the coverage. |
-| `orbit.py` | Blender | Render the vehicle from all round, and from above, under a look in a presentation style. |
-| `fairness.py` | Blender | Measure the angle between neighbouring faces of each painted panel, away from marked creases. |
+| `closeups.py` | Blender | Render the close-up ring over both sides, front, rear and roof, and prove exterior coverage (supports `--poses-from` and `--resume`). |
+| `orbit.py` | Blender | Render the vehicle from all round, and from above, under a look in a presentation style (supports `--poses-from` and `--resume`). |
+| `details.py` | Blender | Render repeatable hero exterior/cabin views with cutaway `hide`, `interior`/`strip-sweep` light, A/B toggles, and sightlines. |
+| `showroom.py` | Blender | Save a ready-to-open lit showroom `.blend` and optional `data/handoff.json` inventory for downstream tools. |
+| `fairness.py` | Blender | Measure neighbouring face angles and multi-scale surface waviness of each painted panel, away from marked creases. |
 | `rays.py` | Blender | List every surface camera rays pass through, and find double skins. |
-| `seating.py` | Blender | Measure the step between each seated part and its panel all round the part's edge. |
+| `seating.py` | Blender | Measure the step between each seated part and its panel all round the part's edge (auto-detecting `rg_seat`). |
 | `separation.py` | Blender | Check that parts which come off are their own objects with their pivots and do not overlap. |
 | `annotate.py` | Python | Draw the numbered marks from marks.json on a picture. |
 | `gates.py` | Python | Judge one round's evidence against the gate limits and write one overall result. |

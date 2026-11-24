@@ -29,7 +29,7 @@ USAGE = ('python tools/compare.py --renders DIR --out DIR [--project DIR] [--cam
          '[--masks refs/masks] [--views a,b] [--max-median-px N] [--max-p95-px N] [--ref-width N]')
 
 
-def render_mask(im, size):
+def render_mask(im, size, fill_holes=True):
     from PIL import Image
     if 'A' not in im.getbands():
         raise BadInput('render has no alpha channel; render_views.py writes RGBA with a transparent background')
@@ -38,14 +38,24 @@ def render_mask(im, size):
         raise BadInput('render is %dx%d, a different shape from the picture (%dx%d)' % (im.width, im.height, pw, ph))
     if im.size != size:
         im = im.resize(size, Image.Resampling.LANCZOS)
-    return im, np.asarray(im.convert('RGBA'))[:, :, 3] > 127
+    rm = np.asarray(im.convert('RGBA'))[:, :, 3] > 127
+    if fill_holes and rm.any():
+        rm = ndimage.binary_fill_holes(rm)         # transparent glass, spokes and grilles are interior holes, not silhouette
+    return im, rm
 
 
-def edge_distances(m1, m2):
+def edge_distances(m1, m2, ignore=None):
     b1, b2 = mask_boundary(m1), mask_boundary(m2)
     if not b1.any() or not b2.any():
         return None
-    return np.concatenate([ndimage.distance_transform_edt(~b2)[b1], ndimage.distance_transform_edt(~b1)[b2]])
+    d12 = ndimage.distance_transform_edt(~b2)
+    d21 = ndimage.distance_transform_edt(~b1)
+    if ignore is not None:
+        b1 = b1 & ~ignore
+        b2 = b2 & ~ignore
+        if not b1.any() or not b2.any():
+            return None
+    return np.concatenate([d12[b1], d21[b2]])
 
 
 def crop_box(m1, m2, aspect, margin=0.08):
@@ -107,6 +117,8 @@ def main(argv):
     ap.add_argument('--ref-width', type=float)
     ap.add_argument('--panel-width', type=int, default=640)
     ap.add_argument('--no-crop', action='store_true')
+    ap.add_argument('--keep-holes', action='store_true',
+                    help='do not fill interior holes in the render alpha (transparent windows, spokes, grilles)')
     a = ap.parse(argv)
     project = os.path.abspath(a.project)
     lim, _ = project_limits(project)
@@ -133,7 +145,7 @@ def main(argv):
             raise BadInput('picture of %r is %dx%d but its camera is %dx%d' % (v, pic.width, pic.height,
                                                                                 c['width'], c['height']))
         rp = os.path.join(a.renders, v + '.png')
-        rim, rm = render_mask(open_image(rp, 'render of %r' % v), pic.size)
+        rim, rm = render_mask(open_image(rp, 'render of %r' % v), pic.size, fill_holes=not a.keep_holes)
         mp = os.path.join(masks, v + '.png')
         pm = None
         if os.path.isfile(mp):
@@ -141,9 +153,17 @@ def main(argv):
             if mim.size != pic.size:
                 raise BadInput('mask of %r is %dx%d, the picture %dx%d' % (v, mim.width, mim.height, *pic.size))
             pm = np.asarray(mim.convert('L')) > 127
+        ip = os.path.join(masks, v + '-ignore.png')
+        ig = None
+        if os.path.isfile(ip):
+            iim = open_image(ip, 'ignore mask of %r' % v)
+            if iim.size != pic.size:
+                raise BadInput('ignore mask of %r is %dx%d, the picture %dx%d' % (v, iim.width, iim.height, *pic.size))
+            ig = np.asarray(iim.convert('L')) > 127
         st = dict(grade=c.get('grade'), counted=counted, width=pic.width, height=pic.height, render=rp,
-                  mask=mp if pm is not None else None, board=os.path.join(a.out, 'boards', v + '.jpg'))
-        d = edge_distances(pm, rm) if pm is not None and pm.any() else None
+                  mask=mp if pm is not None else None, ignore_mask=ip if ig is not None else None,
+                  holes_filled=not a.keep_holes, board=os.path.join(a.out, 'boards', v + '.jpg'))
+        d = edge_distances(pm, rm, ignore=ig) if pm is not None and pm.any() else None
         if d is None:
             st.update(median_px=None, p95_px=None, median_px_ref=None, p95_px_ref=None,
                       note='no mask for this view' if pm is None or not pm.any() else 'the render shows no vehicle')
