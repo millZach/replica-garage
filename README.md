@@ -13,6 +13,26 @@ sub-agents can follow the same steps alone.
 The car above is the build this skill was written from. See [the worked example](examples/gt3rs/README.md)
 for more pictures, the film, and what it took.
 
+## Vehicles built with it
+
+The GT3 RS came before the skill. These builds have used it since. Where a vehicle appears more than once,
+different models built it side by side as a comparison, each running the manager and every sub-agent.
+
+| Vehicle | Built by | Where it got to |
+|---|---|---|
+| 2011 Lamborghini Aventador LP 700-4 | Astra 6.2, Max | Finished; the first build with the skill. Its note is in `vehicles/` |
+| Anakin Skywalker's Eta-2 Actis-class Jedi interceptor | Astra 6.2, Max | Taken through to a film |
+| | Gemini 4 Neon, xhigh | Taken through to a film |
+| 1994 Toyota Supra Mk4 (JZA80) from *The Fast and the Furious* | Gemini 4 Neon, high | Finished, after 27 judged rounds |
+| | Astra 6.2, xhigh | First build, in progress |
+| | Opus 5.5, xhigh | First build, in progress |
+| 2026 Tesla Roadster | Astra 6.2, xhigh | Finishing, after 22 judged rounds |
+| Tesla Cybercab | Astra 6.2, xhigh | First build, in progress |
+| Tesla Semi | Astra 6.2, xhigh | First build, in progress |
+
+The Supra was also built without the skill, by Gemini 4 Neon and by Opus 5.5, as a baseline to compare
+against.
+
 ## What you get
 
 A finished model: shape, paint, glass, lamps and interior, built entirely from code, with every colour as a
@@ -52,10 +72,10 @@ You need Blender and Python 3.10 or newer. `tools/requirements.txt` lists the Py
 
 ## Honest limits
 
-- **It comes from one build.** The method and the gate limits were worked out on a single car. Trucks, bikes
-  and other vehicles are untried.
-- **The tools are new.** They pass their tests on small made-up scenes, and one small render has been through
-  a graphics card. They have not yet been through a whole build of a real vehicle.
+- **It comes from one build.** The method and the gate limits were worked out on a single car. The builds
+  above have tried them on other cars and a starfighter; the first truck is in progress, and bikes are untried.
+- **The tools are young.** They pass their tests on small made-up scenes and have carried a few whole builds
+  to the end, listed above. That is not many.
 - **It measures; it does not trace.** The build it came from used hand-traced drawings as well. This skill
   works from blueprints and photos through solved cameras only, and that route is still being proven.
 - **Reference material stays with you.** The agent finds it from free sources and keeps it on your machine.
